@@ -19,14 +19,13 @@ from src.config import (
     ensure_dirs,
     load_sign_list,
 )
-from src.mediapipe_compat import HolisticDetector
+from src.mediapipe_compat import HolisticDetector, extract_landmarks_from_result
 from src.scraper import (
     _sanitize_dirname,
     get_recording_count,
     get_video_count,
 )
 
-# Hand and pose connections for drawing landmarks manually
 _HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
     (0, 5), (5, 6), (6, 7), (7, 8),
@@ -79,10 +78,7 @@ def _draw_landmarks(frame: np.ndarray, result) -> None:
 
 
 def _resize_keep_aspect(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
-    """Resize frame to fit within target dimensions, keeping aspect ratio.
-
-    Pads with black to fill the target size.
-    """
+    """Resize frame keeping aspect ratio, pad with black."""
     h, w = frame.shape[:2]
     scale = min(target_w / w, target_h / h)
     new_w, new_h = int(w * scale), int(h * scale)
@@ -109,8 +105,8 @@ class DesktopApp:
         )
         self.current_prediction = ""
         self.confidence = 0.0
-        self.is_hands_active = False
         self.last_result = None
+        self.frame_count = 0
 
         # Recording state
         self.recording_mode = False
@@ -136,18 +132,15 @@ class DesktopApp:
         for s in self.sign_list:
             print(f"  - {s}")
 
-        # Run pipeline in background
         pipeline_thread = threading.Thread(target=self._run_pipeline, daemon=True)
         pipeline_thread.start()
 
-        # Initialize detector
         print("\nInitialisiere MediaPipe...")
         self.detector = HolisticDetector(
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
 
-        # Open webcam
         cap = cv2.VideoCapture(WEBCAM_INDEX)
         if not cap.isOpened():
             print("[FEHLER] Webcam konnte nicht geoeffnet werden!")
@@ -165,20 +158,23 @@ class DesktopApp:
                 break
 
             frame = cv2.flip(frame, 1)
+            self.frame_count += 1
 
-            # Always run detection to get landmarks for drawing
+            # Run detection every frame
             if self.detector:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 self.last_result = self.detector.process(rgb)
 
-            # Process recognition if model is ready
-            if self.pipeline_done and self.clf is not None and not self.recording_mode:
-                self._process_recognition_from_result()
+            # Always buffer landmarks and predict if model ready
+            if self.clf is not None and self.last_result and not self.recording_mode:
+                landmarks = extract_landmarks_from_result(self.last_result)
+                self.landmark_buffer.append(landmarks)
+                # Predict every 5 frames for smooth updates
+                if self.frame_count % 5 == 0 and len(self.landmark_buffer) >= 10:
+                    self._predict()
 
-            # Build display
             display = frame.copy()
 
-            # Draw landmarks on webcam feed
             if self.last_result:
                 _draw_landmarks(display, self.last_result)
 
@@ -214,26 +210,29 @@ class DesktopApp:
         """Run download -> extract -> train pipeline automatically."""
         from src.scraper import download_all_signs
 
-        # Download
         self.pipeline_status = "Videos herunterladen..."
         print("\n=== Videos herunterladen ===")
         download_all_signs(self.sign_list)
 
-        # Check if any signs need more data before extracting
-        self._check_signs_needing_data()
-        if self.signs_needing_data:
-            self.pipeline_done = True
-            self.pipeline_status = "Aufnahme noetig"
-            print("\n=== Nicht genug Videos - Aufnahme-Modus ===")
-            return
+        # Count what we have
+        total_videos = 0
+        signs_with_enough = 0
+        for sign_name in self.sign_list:
+            count = get_video_count(sign_name) + get_recording_count(sign_name)
+            total_videos += count
+            if count >= MIN_VIDEOS_PER_SIGN:
+                signs_with_enough += 1
+            print(f"  {sign_name}: {count} Videos")
 
-        # Extract landmarks
+        print(f"\n  {signs_with_enough}/{len(self.sign_list)} Gebaerden haben genug Videos")
+
+        # Extract landmarks from ALL available videos
         self.pipeline_status = "Landmarks extrahieren..."
         print("\n=== Landmarks extrahieren ===")
         from src.landmark_extractor import extract_all_landmarks
         extract_all_landmarks(self.sign_list)
 
-        # Train
+        # Try to train if we have at least 2 signs with data
         self.pipeline_status = "Modell trainieren..."
         print("\n=== Modell trainieren ===")
         from src.trainer import train_model
@@ -242,21 +241,31 @@ class DesktopApp:
         if success:
             self._load_model()
             self.pipeline_status = "Bereit!"
+            print("\n>>> Modell erfolgreich geladen! Erkennung aktiv. <<<")
         else:
-            self.pipeline_status = "Zu wenig Daten - Aufnahme noetig"
-            self._check_signs_needing_data()
+            self.pipeline_status = "Training fehlgeschlagen"
+            print("\n>>> Training fehlgeschlagen <<<")
+
+        # Check which signs still need data
+        self._check_signs_needing_data()
 
         self.pipeline_done = True
-        print("\n=== Pipeline abgeschlossen ===\n")
+        print("\n=== Pipeline abgeschlossen ===")
+        if self.clf is not None:
+            print(f">>> Modell bereit mit {len(self.le.classes_)} Gebaerden <<<")
+        else:
+            print(">>> Kein Modell - Aufnahme-Modus aktiv <<<")
 
     def _load_model(self) -> None:
         """Load the trained model."""
         if not MODEL_PATH.exists():
+            print(f"  Modell-Datei nicht gefunden: {MODEL_PATH}")
             return
         from src.trainer import load_model
         result = load_model()
         if result:
             self.clf, self.le = result
+            print(f"  Modell geladen: {len(self.le.classes_)} Gebaerden")
 
     def _check_signs_needing_data(self) -> None:
         """Check which signs need more recordings."""
@@ -272,7 +281,7 @@ class DesktopApp:
                     "needed": MIN_VIDEOS_PER_SIGN - total,
                 })
 
-        if self.signs_needing_data:
+        if self.signs_needing_data and self.clf is None:
             self.recording_mode = True
             self.current_rec_idx = 0
             self._open_reference_video()
@@ -309,29 +318,6 @@ class DesktopApp:
             self.ref_frame = frame
         return self.ref_frame
 
-    def _process_recognition_from_result(self) -> None:
-        """Process recognition using the last detection result."""
-        from src.mediapipe_compat import extract_landmarks_from_result
-
-        if self.last_result is None:
-            return
-        landmarks = extract_landmarks_from_result(self.last_result)
-
-        hand_data = landmarks[:126]
-        has_hands = bool(np.any(hand_data != 0))
-
-        if has_hands:
-            if not self.is_hands_active:
-                self.is_hands_active = True
-                self.landmark_buffer.clear()
-            self.landmark_buffer.append(landmarks)
-            if len(self.landmark_buffer) >= 10:
-                self._predict()
-        else:
-            if self.is_hands_active and len(self.landmark_buffer) >= 5:
-                self._predict()
-            self.is_hands_active = False
-
     def _predict(self) -> None:
         """Predict the current sign from the buffer."""
         if self.clf is None or self.le is None:
@@ -355,7 +341,6 @@ class DesktopApp:
         """Build the recognition overlay on the frame."""
         h, w = frame.shape[:2]
 
-        # Top bar
         cv2.rectangle(frame, (0, 0), (w, 70), (20, 20, 40), -1)
         cv2.putText(
             frame, "OeGS Gebaerden-Erkennung",
@@ -373,14 +358,11 @@ class DesktopApp:
                 (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 100, 255), 1,
             )
         else:
-            status = "Haende erkannt" if self.is_hands_active else "Warte auf Gebaerde..."
-            color = (0, 100, 255) if self.is_hands_active else (100, 255, 100)
             cv2.putText(
-                frame, status,
-                (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
+                frame, "Erkennung aktiv - zeige eine Gebaerde",
+                (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1,
             )
 
-        # Prediction box (bottom)
         if self.current_prediction:
             cv2.rectangle(frame, (0, h - 90), (w, h), (20, 20, 40), -1)
             cv2.putText(
@@ -397,7 +379,6 @@ class DesktopApp:
             bar_color = (100, 255, 100) if self.confidence > 0.7 else (100, 200, 255)
             cv2.rectangle(frame, (15, h - 95), (15 + bar_w, h - 92), bar_color, -1)
 
-        # Controls hint
         if self.pipeline_done:
             cv2.putText(
                 frame, "Q=Beenden  M=Aufnahme-Modus",
@@ -431,7 +412,6 @@ class DesktopApp:
         ch, cw = combined.shape[:2]
         mid = cw // 2 if ref_frame is not None else cw
 
-        # Top bar over webcam side
         cv2.rectangle(combined, (0, 0), (mid, 70), (20, 20, 40), -1)
         cv2.putText(
             combined, f"AUFNAHME: {sign['name']}",
@@ -443,7 +423,6 @@ class DesktopApp:
             (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 200, 255), 1,
         )
 
-        # Label over reference side
         if ref_frame is not None:
             cv2.rectangle(combined, (mid, 0), (cw, 40), (20, 20, 40), -1)
             cv2.putText(
@@ -451,7 +430,6 @@ class DesktopApp:
                 (mid + 10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1,
             )
 
-        # Bottom controls
         cv2.rectangle(combined, (0, ch - 35), (cw, ch), (20, 20, 40), -1)
         nav = f"Gebaerde {self.current_rec_idx + 1}/{len(self.signs_needing_data)}"
         cv2.putText(
@@ -468,11 +446,9 @@ class DesktopApp:
         elapsed = time.time() - self.recording_start_time
         progress = min(1.0, elapsed / RECORDING_DURATION_SECONDS)
 
-        # Draw landmarks during recording too
         if self.last_result:
             _draw_landmarks(frame, self.last_result)
 
-        # Red recording indicator
         cv2.rectangle(frame, (0, 0), (w, 50), (0, 0, 60), -1)
         cv2.circle(frame, (25, 25), 10, (0, 0, 255), -1)
         sign = self.signs_needing_data[self.current_rec_idx]
@@ -481,7 +457,6 @@ class DesktopApp:
             (45, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2,
         )
 
-        # Progress bar
         bar_w = int((w - 20) * progress)
         cv2.rectangle(frame, (10, h - 15), (w - 10, h - 5), (40, 40, 60), -1)
         cv2.rectangle(frame, (10, h - 15), (10 + bar_w, h - 5), (0, 0, 255), -1)
@@ -496,7 +471,6 @@ class DesktopApp:
         sign = self.signs_needing_data[self.current_rec_idx]
         print(f"\nAufnahme fuer '{sign['name']}' startet...")
 
-        # Countdown
         for i in range(3, 0, -1):
             ret, frame = cap.read()
             if ret:
@@ -553,7 +527,6 @@ class DesktopApp:
         self.recording_frames = []
         print(f"  Aufnahme gespeichert: {save_path}")
 
-        # Update counts
         sign["total"] = get_video_count(sign["name"]) + get_recording_count(sign["name"])
         sign["needed"] = max(0, MIN_VIDEOS_PER_SIGN - sign["total"])
 
