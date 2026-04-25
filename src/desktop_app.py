@@ -19,13 +19,79 @@ from src.config import (
     ensure_dirs,
     load_sign_list,
 )
-from src.landmark_extractor import extract_landmarks_from_frame
 from src.mediapipe_compat import HolisticDetector
 from src.scraper import (
     _sanitize_dirname,
     get_recording_count,
     get_video_count,
 )
+
+# Hand and pose connections for drawing landmarks manually
+_HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (0, 9), (9, 10), (10, 11), (11, 12),
+    (0, 13), (13, 14), (14, 15), (15, 16),
+    (0, 17), (17, 18), (18, 19), (19, 20),
+    (5, 9), (9, 13), (13, 17),
+]
+
+_POSE_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 7),
+    (0, 4), (4, 5), (5, 6), (6, 8),
+    (9, 10),
+    (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
+    (11, 23), (12, 24), (23, 24),
+    (23, 25), (25, 27), (24, 26), (26, 28),
+    (27, 29), (29, 31), (28, 30), (30, 32),
+]
+
+
+def _draw_landmarks(frame: np.ndarray, result) -> None:
+    """Draw hand and pose landmarks on a BGR frame using raw OpenCV."""
+    h, w = frame.shape[:2]
+
+    def _draw_hand(landmarks, color, conn_color):
+        if not landmarks:
+            return
+        pts = []
+        for lm in landmarks:
+            px, py = int(lm.x * w), int(lm.y * h)
+            pts.append((px, py))
+            cv2.circle(frame, (px, py), 4, color, -1)
+            cv2.circle(frame, (px, py), 5, conn_color, 1)
+        for i, j in _HAND_CONNECTIONS:
+            if i < len(pts) and j < len(pts):
+                cv2.line(frame, pts[i], pts[j], conn_color, 2)
+
+    _draw_hand(result.left_hand_landmarks, (0, 200, 255), (0, 150, 200))
+    _draw_hand(result.right_hand_landmarks, (255, 200, 0), (200, 150, 0))
+
+    if result.pose_landmarks:
+        pts = []
+        for lm in result.pose_landmarks:
+            px, py = int(lm.x * w), int(lm.y * h)
+            pts.append((px, py))
+            cv2.circle(frame, (px, py), 3, (100, 255, 100), -1)
+        for i, j in _POSE_CONNECTIONS:
+            if i < len(pts) and j < len(pts):
+                cv2.line(frame, pts[i], pts[j], (80, 200, 80), 2)
+
+
+def _resize_keep_aspect(frame: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+    """Resize frame to fit within target dimensions, keeping aspect ratio.
+
+    Pads with black to fill the target size.
+    """
+    h, w = frame.shape[:2]
+    scale = min(target_w / w, target_h / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(frame, (new_w, new_h))
+    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    y_off = (target_h - new_h) // 2
+    x_off = (target_w - new_w) // 2
+    canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
+    return canvas
 
 
 class DesktopApp:
@@ -44,27 +110,29 @@ class DesktopApp:
         self.current_prediction = ""
         self.confidence = 0.0
         self.is_hands_active = False
-        self.history: list[tuple[str, float]] = []
+        self.last_result = None
 
         # Recording state
         self.recording_mode = False
         self.signs_needing_data: list[dict] = []
         self.current_rec_idx = 0
         self.is_recording = False
-        self.recording_countdown = 0
         self.recording_frames: list[np.ndarray] = []
         self.recording_start_time = 0.0
-        self.reference_frame: np.ndarray | None = None
+
+        # Reference video playback
+        self.ref_cap: cv2.VideoCapture | None = None
+        self.ref_frame: np.ndarray | None = None
 
     def run(self) -> None:
         """Main entry point."""
         ensure_dirs()
 
         if not self.sign_list:
-            print("[FEHLER] Keine Gebärden in gebaerden.txt!")
+            print("[FEHLER] Keine Gebaerden in gebaerden.txt!")
             return
 
-        print(f"\nGeladene Gebärden: {len(self.sign_list)}")
+        print(f"\nGeladene Gebaerden: {len(self.sign_list)}")
         for s in self.sign_list:
             print(f"  - {s}")
 
@@ -82,10 +150,10 @@ class DesktopApp:
         # Open webcam
         cap = cv2.VideoCapture(WEBCAM_INDEX)
         if not cap.isOpened():
-            print("[FEHLER] Webcam konnte nicht geöffnet werden!")
+            print("[FEHLER] Webcam konnte nicht geoeffnet werden!")
             return
 
-        print("Webcam geöffnet. Drücke Q zum Beenden.\n")
+        print("Webcam geoeffnet. Druecke Q zum Beenden.\n")
 
         window_name = "OeGS Gebaerden-Erkennung"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -97,10 +165,22 @@ class DesktopApp:
                 break
 
             frame = cv2.flip(frame, 1)
+
+            # Always run detection to get landmarks for drawing
+            if self.detector:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                self.last_result = self.detector.process(rgb)
+
+            # Process recognition if model is ready
+            if self.pipeline_done and self.clf is not None and not self.recording_mode:
+                self._process_recognition_from_result()
+
+            # Build display
             display = frame.copy()
 
-            if self.pipeline_done and self.clf is not None:
-                self._process_recognition(frame)
+            # Draw landmarks on webcam feed
+            if self.last_result:
+                _draw_landmarks(display, self.last_result)
 
             if self.recording_mode and not self.is_recording:
                 display = self._build_recording_view(display)
@@ -125,18 +205,27 @@ class DesktopApp:
                 self._toggle_mode()
 
         cap.release()
+        self._close_ref_video()
         cv2.destroyAllWindows()
         if self.detector:
             self.detector.close()
 
     def _run_pipeline(self) -> None:
-        """Run download → extract → train pipeline automatically."""
+        """Run download -> extract -> train pipeline automatically."""
         from src.scraper import download_all_signs
 
         # Download
         self.pipeline_status = "Videos herunterladen..."
         print("\n=== Videos herunterladen ===")
         download_all_signs(self.sign_list)
+
+        # Check if any signs need more data before extracting
+        self._check_signs_needing_data()
+        if self.signs_needing_data:
+            self.pipeline_done = True
+            self.pipeline_status = "Aufnahme noetig"
+            print("\n=== Nicht genug Videos - Aufnahme-Modus ===")
+            return
 
         # Extract landmarks
         self.pipeline_status = "Landmarks extrahieren..."
@@ -154,7 +243,7 @@ class DesktopApp:
             self._load_model()
             self.pipeline_status = "Bereit!"
         else:
-            self.pipeline_status = "Zu wenig Daten - Aufnahme nötig"
+            self.pipeline_status = "Zu wenig Daten - Aufnahme noetig"
             self._check_signs_needing_data()
 
         self.pipeline_done = True
@@ -186,11 +275,12 @@ class DesktopApp:
         if self.signs_needing_data:
             self.recording_mode = True
             self.current_rec_idx = 0
-            self._load_reference_video()
+            self._open_reference_video()
 
-    def _load_reference_video(self) -> None:
-        """Load a reference video frame for the current sign."""
-        self.reference_frame = None
+    def _open_reference_video(self) -> None:
+        """Open the reference video for the current sign as a VideoCapture."""
+        self._close_ref_video()
+        self.ref_frame = None
         if not self.signs_needing_data:
             return
         sign = self.signs_needing_data[self.current_rec_idx]
@@ -199,17 +289,33 @@ class DesktopApp:
         if video_dir.exists():
             videos = list(video_dir.glob("*.mp4"))
             if videos:
-                cap = cv2.VideoCapture(str(videos[0]))
-                ret, frame = cap.read()
-                if ret:
-                    self.reference_frame = frame
-                cap.release()
+                self.ref_cap = cv2.VideoCapture(str(videos[0]))
 
-    def _process_recognition(self, frame: np.ndarray) -> None:
-        """Process a frame for sign recognition."""
-        landmarks = extract_landmarks_from_frame(frame, self.detector)
-        if landmarks is None:
+    def _close_ref_video(self) -> None:
+        """Release the reference video capture."""
+        if self.ref_cap is not None:
+            self.ref_cap.release()
+            self.ref_cap = None
+
+    def _read_ref_frame(self) -> np.ndarray | None:
+        """Read the next frame from the reference video (loops)."""
+        if self.ref_cap is None or not self.ref_cap.isOpened():
+            return self.ref_frame
+        ret, frame = self.ref_cap.read()
+        if not ret:
+            self.ref_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = self.ref_cap.read()
+        if ret:
+            self.ref_frame = frame
+        return self.ref_frame
+
+    def _process_recognition_from_result(self) -> None:
+        """Process recognition using the last detection result."""
+        from src.mediapipe_compat import extract_landmarks_from_result
+
+        if self.last_result is None:
             return
+        landmarks = extract_landmarks_from_result(self.last_result)
 
         hand_data = landmarks[:126]
         has_hands = bool(np.any(hand_data != 0))
@@ -242,9 +348,6 @@ class DesktopApp:
             pred = self.le.inverse_transform([max_idx])[0]
             self.current_prediction = pred
             self.confidence = conf
-            self.history.insert(0, (pred, conf))
-            if len(self.history) > 10:
-                self.history.pop()
 
     def _build_recognition_view(self, frame: np.ndarray) -> np.ndarray:
         """Build the recognition overlay on the frame."""
@@ -282,7 +385,6 @@ class DesktopApp:
                 frame, conf_text,
                 (15, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1,
             )
-            # Confidence bar
             bar_w = int((w - 30) * self.confidence)
             cv2.rectangle(frame, (15, h - 95), (w - 15, h - 92), (40, 40, 60), -1)
             bar_color = (100, 255, 100) if self.confidence > 0.7 else (100, 200, 255)
@@ -298,7 +400,7 @@ class DesktopApp:
         return frame
 
     def _build_recording_view(self, frame: np.ndarray) -> np.ndarray:
-        """Build the recording mode view with reference video."""
+        """Build the recording mode view with reference video side by side."""
         h, w = frame.shape[:2]
 
         if not self.signs_needing_data:
@@ -309,27 +411,21 @@ class DesktopApp:
             return frame
 
         sign = self.signs_needing_data[self.current_rec_idx]
+        ref_frame = self._read_ref_frame()
 
-        # If reference video exists, show side by side
-        if self.reference_frame is not None:
-            ref_resized = cv2.resize(self.reference_frame, (w // 2, h))
-            cam_resized = cv2.resize(frame, (w // 2, h))
-            combined = np.hstack([cam_resized, ref_resized])
-
-            ch, cw = combined.shape[:2]
-
-            # Reference label
-            cv2.rectangle(combined, (cw // 2, 0), (cw, 40), (20, 20, 40), -1)
-            cv2.putText(
-                combined, "Referenzvideo",
-                (cw // 2 + 10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1,
-            )
+        if ref_frame is not None:
+            half_w = w // 2
+            cam_view = _resize_keep_aspect(frame, half_w, h)
+            ref_view = _resize_keep_aspect(ref_frame, half_w, h)
+            combined = np.hstack([cam_view, ref_view])
         else:
             combined = frame.copy()
-            ch, cw = combined.shape[:2]
 
-        # Top bar
-        cv2.rectangle(combined, (0, 0), (cw // 2 if self.reference_frame is not None else cw, 70), (20, 20, 40), -1)
+        ch, cw = combined.shape[:2]
+        mid = cw // 2 if ref_frame is not None else cw
+
+        # Top bar over webcam side
+        cv2.rectangle(combined, (0, 0), (mid, 70), (20, 20, 40), -1)
         cv2.putText(
             combined, f"AUFNAHME: {sign['name']}",
             (15, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 100, 255), 2,
@@ -340,11 +436,20 @@ class DesktopApp:
             (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 200, 255), 1,
         )
 
+        # Label over reference side
+        if ref_frame is not None:
+            cv2.rectangle(combined, (mid, 0), (cw, 40), (20, 20, 40), -1)
+            cv2.putText(
+                combined, "Referenzvideo",
+                (mid + 10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1,
+            )
+
         # Bottom controls
         cv2.rectangle(combined, (0, ch - 35), (cw, ch), (20, 20, 40), -1)
         nav = f"Gebaerde {self.current_rec_idx + 1}/{len(self.signs_needing_data)}"
         cv2.putText(
-            combined, f"LEERTASTE=Aufnahme  N=Naechste  P=Vorherige  M=Erkennung  Q=Beenden  |  {nav}",
+            combined,
+            f"LEERTASTE=Aufnahme  N/P=Wechseln  M=Erkennung  Q=Beenden  |  {nav}",
             (10, ch - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1,
         )
 
@@ -355,6 +460,10 @@ class DesktopApp:
         h, w = frame.shape[:2]
         elapsed = time.time() - self.recording_start_time
         progress = min(1.0, elapsed / RECORDING_DURATION_SECONDS)
+
+        # Draw landmarks during recording too
+        if self.last_result:
+            _draw_landmarks(frame, self.last_result)
 
         # Red recording indicator
         cv2.rectangle(frame, (0, 0), (w, 50), (0, 0, 60), -1)
@@ -373,7 +482,7 @@ class DesktopApp:
         return frame
 
     def _start_recording(self, cap: cv2.VideoCapture) -> None:
-        """Start recording a sign."""
+        """Start recording a sign with countdown."""
         if not self.signs_needing_data:
             return
 
@@ -386,7 +495,9 @@ class DesktopApp:
             if ret:
                 frame = cv2.flip(frame, 1)
                 h, w = frame.shape[:2]
-                cv2.rectangle(frame, (0, 0), (w, h), (0, 0, 0), -1)
+                overlay = frame.copy()
+                cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 0), -1)
+                frame = cv2.addWeighted(overlay, 0.6, frame, 0.4, 0)
                 cv2.putText(
                     frame, str(i),
                     (w // 2 - 40, h // 2 + 40),
@@ -406,9 +517,8 @@ class DesktopApp:
 
     def _handle_recording(self, frame: np.ndarray) -> None:
         """Handle frame during recording."""
-        elapsed = time.time() - self.recording_start_time
         self.recording_frames.append(frame.copy())
-
+        elapsed = time.time() - self.recording_start_time
         if elapsed >= RECORDING_DURATION_SECONDS:
             self._save_recording()
 
@@ -450,17 +560,18 @@ class DesktopApp:
                 self.current_rec_idx + 1,
                 len(self.signs_needing_data) - 1,
             )
-            self._load_reference_video()
+            self._open_reference_video()
 
     def _prev_sign(self) -> None:
         """Move to the previous sign needing data."""
         self.current_rec_idx = max(self.current_rec_idx - 1, 0)
-        self._load_reference_video()
+        self._open_reference_video()
 
     def _toggle_mode(self) -> None:
         """Toggle between recognition and recording mode."""
         if self.recording_mode:
             self.recording_mode = False
+            self._close_ref_video()
             self._load_model()
         else:
             self._check_signs_needing_data()
