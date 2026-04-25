@@ -60,8 +60,8 @@ def pad_or_truncate_sequence(
 ) -> np.ndarray:
     """Pad or truncate a landmark sequence to a fixed length."""
     if len(sequence) == 0:
-        feature_size = 258  # 63 + 63 + 132
-        return np.zeros((target_length, feature_size))
+        from src.config import FEATURES_PER_FRAME
+        return np.zeros((target_length, FEATURES_PER_FRAME))
 
     feature_size = sequence[0].shape[0]
 

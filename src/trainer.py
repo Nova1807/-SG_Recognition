@@ -18,10 +18,7 @@ from src.landmark_extractor import load_training_data
 def _augment_sequence(sequence: np.ndarray, n_augments: int = 5) -> list[np.ndarray]:
     """Create augmented versions of a landmark sequence.
 
-    Each frame has 258 features:
-    - [0:63] left hand (21 landmarks * xyz)
-    - [63:126] right hand (21 landmarks * xyz)
-    - [126:258] pose (33 landmarks * xyzv)
+    Features are angles and distances so noise must be small.
     """
     augmented = [sequence]
     rng = np.random.default_rng()
@@ -29,25 +26,24 @@ def _augment_sequence(sequence: np.ndarray, n_augments: int = 5) -> list[np.ndar
     for _ in range(n_augments):
         aug = sequence.copy()
 
-        # Add small noise to coordinates
-        noise = rng.normal(0, 0.01, aug.shape).astype(np.float32)
+        # Small noise on angle/distance features
+        noise = rng.normal(0, 0.02, aug.shape).astype(np.float32)
         aug = aug + noise
 
-        # Random time shift: shift sequence by 1-3 frames
+        # Random time shift
         shift = rng.integers(1, 4)
         if rng.random() > 0.5:
             aug = np.roll(aug, shift, axis=0)
         else:
             aug = np.roll(aug, -shift, axis=0)
 
-        # Random speed: subsample or stretch slightly
+        # Random speed variation
         if rng.random() > 0.5:
             n_frames = aug.shape[0]
             speed = rng.uniform(0.85, 1.15)
             new_len = max(5, int(n_frames * speed))
             indices = np.linspace(0, n_frames - 1, new_len).astype(int)
             stretched = aug[indices]
-            # Pad/truncate back to original length
             if len(stretched) >= n_frames:
                 aug = stretched[:n_frames]
             else:
