@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ÖGS Erkennung{% endblock %}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f0f1a;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        nav {
+            background: #1a1a2e;
+            padding: 1rem 2rem;
+            display: flex;
+            align-items: center;
+            gap: 2rem;
+            border-bottom: 2px solid #16213e;
+        }
+        nav .logo {
+            font-size: 1.4rem;
+            font-weight: bold;
+            color: #4fc3f7;
+        }
+        nav a {
+            color: #aaa;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            transition: all 0.2s;
+        }
+        nav a:hover, nav a.active {
+            color: #fff;
+            background: #16213e;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1 { color: #4fc3f7; margin-bottom: 1.5rem; }
+        h2 { color: #81d4fa; margin-bottom: 1rem; }
+        .card {
+            background: #1a1a2e;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            border: 1px solid #16213e;
+        }
+        .btn {
+            display: inline-block;
+            padding: 0.7rem 1.5rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            transition: all 0.2s;
+            text-decoration: none;
+        }
+        .btn-primary {
+            background: #4fc3f7;
+            color: #0f0f1a;
+        }
+        .btn-primary:hover { background: #29b6f6; }
+        .btn-success {
+            background: #66bb6a;
+            color: #0f0f1a;
+        }
+        .btn-success:hover { background: #4caf50; }
+        .btn-warning {
+            background: #ffa726;
+            color: #0f0f1a;
+        }
+        .btn-warning:hover { background: #ff9800; }
+        .btn-danger {
+            background: #ef5350;
+            color: #fff;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .badge {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: bold;
+        }
+        .badge-ok { background: #2e7d32; color: #c8e6c9; }
+        .badge-wenig { background: #e65100; color: #ffe0b2; }
+        .badge-fehlt { background: #c62828; color: #ffcdd2; }
+        .progress-bar {
+            background: #16213e;
+            border-radius: 8px;
+            height: 8px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4fc3f7, #66bb6a);
+            border-radius: 8px;
+            transition: width 0.3s;
+        }
+        .log-box {
+            background: #0a0a15;
+            border-radius: 8px;
+            padding: 1rem;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            color: #81d4fa;
+            margin-top: 1rem;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 1rem;
+        }
+        .sign-card {
+            background: #1a1a2e;
+            border-radius: 12px;
+            padding: 1.2rem;
+            border: 1px solid #16213e;
+            transition: transform 0.2s;
+        }
+        .sign-card:hover { transform: translateY(-2px); }
+        .sign-card h3 {
+            color: #fff;
+            margin-bottom: 0.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .sign-card .stats {
+            color: #888;
+            font-size: 0.85rem;
+            margin-bottom: 0.5rem;
+        }
+        .actions { display: flex; gap: 0.5rem; margin-top: 1rem; }
+    </style>
+    {% block extra_head %}{% endblock %}
+</head>
+<body>
+    <nav>
+        <span class="logo">ÖGS Erkennung</span>
+        <a href="/" class="{% if request.path == '/' %}active{% endif %}">Dashboard</a>
+        <a href="/recognize" class="{% if request.path == '/recognize' %}active{% endif %}">Erkennung</a>
+        <a href="/record" class="{% if request.path == '/record' %}active{% endif %}">Aufnahme</a>
+    </nav>
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+    {% block extra_scripts %}{% endblock %}
+</body>
+</html>

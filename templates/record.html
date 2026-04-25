@@ -1,0 +1,317 @@
+{% extends "base.html" %}
+{% block title %}ÖGS Erkennung - Aufnahme{% endblock %}
+
+{% block extra_head %}
+<style>
+    .record-layout {
+        display: flex;
+        gap: 2rem;
+        flex-wrap: wrap;
+    }
+    .sign-list-panel {
+        flex: 0 0 300px;
+        max-height: 80vh;
+        overflow-y: auto;
+    }
+    .recording-panel {
+        flex: 1;
+        min-width: 400px;
+    }
+    .sign-item {
+        padding: 1rem;
+        border-radius: 8px;
+        cursor: pointer;
+        margin-bottom: 0.5rem;
+        background: #16213e;
+        transition: all 0.2s;
+        border: 2px solid transparent;
+    }
+    .sign-item:hover { border-color: #4fc3f7; }
+    .sign-item.active { border-color: #4fc3f7; background: #1a2744; }
+    .sign-item.complete { border-color: #66bb6a; }
+    .sign-item h4 {
+        display: flex;
+        justify-content: space-between;
+        color: #fff;
+        margin-bottom: 0.3rem;
+    }
+    .sign-item .info { color: #888; font-size: 0.8rem; }
+    #webcam-record {
+        width: 100%;
+        border-radius: 12px;
+        transform: scaleX(-1);
+        background: #000;
+    }
+    .reference-section {
+        margin-top: 1rem;
+    }
+    .reference-video {
+        width: 100%;
+        max-width: 300px;
+        border-radius: 8px;
+    }
+    .record-controls {
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+        margin-top: 1rem;
+    }
+    .countdown-overlay {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 6rem;
+        font-weight: bold;
+        color: #4fc3f7;
+        text-shadow: 0 0 20px rgba(79, 195, 247, 0.5);
+        display: none;
+    }
+    .recording-indicator {
+        display: none;
+        align-items: center;
+        gap: 0.5rem;
+        color: #ef5350;
+        font-weight: bold;
+    }
+    .recording-indicator.active { display: flex; }
+    .rec-dot {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #ef5350;
+        animation: pulse 0.8s infinite;
+    }
+    .video-wrapper {
+        position: relative;
+        display: inline-block;
+        width: 100%;
+    }
+    .rec-progress {
+        height: 6px;
+        background: #16213e;
+        border-radius: 3px;
+        margin-top: 0.5rem;
+        overflow: hidden;
+    }
+    .rec-progress-fill {
+        height: 100%;
+        background: #ef5350;
+        border-radius: 3px;
+        width: 0%;
+        transition: width 0.1s linear;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Aufnahme-Modus</h1>
+<p style="color: #888; margin-bottom: 1.5rem;">
+    Wähle eine Gebärde aus der Liste, sieh dir das Referenzvideo an, und nimm die Gebärde über deine Webcam auf.
+</p>
+
+<div class="record-layout">
+    <!-- Sign list -->
+    <div class="sign-list-panel">
+        <div class="card">
+            <h3 style="margin-bottom: 1rem;">Gebärden</h3>
+            {% for sign in signs %}
+            <div class="sign-item {% if sign.total >= min_videos %}complete{% endif %}"
+                 data-name="{{ sign.name }}"
+                 data-safe="{{ sign.safe_name }}"
+                 data-ref='{{ sign.reference_videos | tojson }}'
+                 data-needed="{{ sign.needed }}"
+                 data-total="{{ sign.total }}"
+                 onclick="selectSign(this)">
+                <h4>
+                    {{ sign.name }}
+                    <span class="badge {% if sign.total >= min_videos %}badge-ok{% elif sign.total > 0 %}badge-wenig{% else %}badge-fehlt{% endif %}">
+                        {{ sign.total }}/{{ min_videos }}
+                    </span>
+                </h4>
+                <div class="info">
+                    Videos: {{ sign.videos }} | Aufnahmen: <span class="rec-count">{{ sign.recordings }}</span>
+                    {% if sign.needed > 0 %}| Noch {{ sign.needed }} nötig{% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Recording panel -->
+    <div class="recording-panel">
+        <div class="card">
+            <h2 id="current-sign-name">Wähle eine Gebärde</h2>
+
+            <div class="video-wrapper">
+                <video id="webcam-record" autoplay playsinline></video>
+                <div class="countdown-overlay" id="countdown"></div>
+            </div>
+
+            <div class="rec-progress" id="rec-progress" style="display: none;">
+                <div class="rec-progress-fill" id="rec-progress-fill"></div>
+            </div>
+
+            <div class="record-controls">
+                <button class="btn btn-danger" onclick="startRecording()" id="btn-record" disabled>
+                    Aufnahme starten
+                </button>
+                <div class="recording-indicator" id="rec-indicator">
+                    <div class="rec-dot"></div>
+                    <span>AUFNAHME</span>
+                </div>
+                <span id="rec-status" style="color: #888;"></span>
+            </div>
+        </div>
+
+        <!-- Reference video -->
+        <div class="card reference-section" id="reference-section" style="display: none;">
+            <h3>Referenzvideo</h3>
+            <p style="color: #888; font-size: 0.9rem; margin-bottom: 0.5rem;">
+                So wird die Gebärde ausgeführt:
+            </p>
+            <video id="reference-video" class="reference-video" controls loop muted></video>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let currentSign = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let webcamStream = null;
+const RECORD_DURATION = {{ recording_duration }} * 1000;
+
+async function initWebcam() {
+    try {
+        webcamStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480 }
+        });
+        document.getElementById('webcam-record').srcObject = webcamStream;
+    } catch (err) {
+        alert('Webcam konnte nicht geöffnet werden: ' + err.message);
+    }
+}
+
+function selectSign(el) {
+    document.querySelectorAll('.sign-item').forEach(s => s.classList.remove('active'));
+    el.classList.add('active');
+
+    currentSign = {
+        name: el.dataset.name,
+        safeName: el.dataset.safe,
+        references: JSON.parse(el.dataset.ref),
+        needed: parseInt(el.dataset.needed),
+        total: parseInt(el.dataset.total),
+    };
+
+    document.getElementById('current-sign-name').textContent = 'Gebärde: ' + currentSign.name;
+    document.getElementById('btn-record').disabled = false;
+
+    const refSection = document.getElementById('reference-section');
+    if (currentSign.references.length > 0) {
+        refSection.style.display = 'block';
+        const refVideo = document.getElementById('reference-video');
+        refVideo.src = currentSign.references[0];
+        refVideo.play();
+    } else {
+        refSection.style.display = 'none';
+    }
+}
+
+async function startRecording() {
+    if (!currentSign || !webcamStream) return;
+
+    const btn = document.getElementById('btn-record');
+    btn.disabled = true;
+
+    // Countdown 3-2-1
+    const countdown = document.getElementById('countdown');
+    for (let i = 3; i >= 1; i--) {
+        countdown.textContent = i;
+        countdown.style.display = 'block';
+        await sleep(1000);
+    }
+    countdown.style.display = 'none';
+
+    // Start recording
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(webcamStream, { mimeType: 'video/webm' });
+
+    mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) recordedChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+        document.getElementById('rec-indicator').classList.remove('active');
+        document.getElementById('rec-progress').style.display = 'none';
+        document.getElementById('rec-status').textContent = 'Speichere...';
+
+        const blob = new Blob(recordedChunks, { type: 'video/webm' });
+        const formData = new FormData();
+        formData.append('video', blob, 'recording.webm');
+        formData.append('sign_name', currentSign.name);
+
+        try {
+            const response = await fetch('/api/save_recording', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await response.json();
+
+            if (data.status === 'saved') {
+                document.getElementById('rec-status').textContent =
+                    `Gespeichert! (${data.total} gesamt)`;
+
+                // Update the sign item
+                const signItem = document.querySelector(`.sign-item[data-name="${currentSign.name}"]`);
+                if (signItem) {
+                    signItem.querySelector('.rec-count').textContent = data.recordings;
+                    const newNeeded = Math.max(0, {{ min_videos }} - data.total);
+                    signItem.dataset.total = data.total;
+                    signItem.dataset.needed = newNeeded;
+                    if (newNeeded <= 0) {
+                        signItem.classList.add('complete');
+                    }
+                }
+            }
+        } catch (err) {
+            document.getElementById('rec-status').textContent = 'Fehler beim Speichern';
+        }
+
+        btn.disabled = false;
+    };
+
+    mediaRecorder.start();
+    document.getElementById('rec-indicator').classList.add('active');
+    document.getElementById('rec-progress').style.display = 'block';
+    document.getElementById('rec-status').textContent = '';
+
+    // Progress bar
+    const startTime = Date.now();
+    const progressFill = document.getElementById('rec-progress-fill');
+    const progressInterval = setInterval(() => {
+        const elapsed = Date.now() - startTime;
+        const pct = Math.min(100, (elapsed / RECORD_DURATION) * 100);
+        progressFill.style.width = pct + '%';
+    }, 50);
+
+    // Stop after duration
+    setTimeout(() => {
+        clearInterval(progressInterval);
+        progressFill.style.width = '100%';
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+        }
+    }, RECORD_DURATION);
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+initWebcam();
+</script>
+{% endblock %}

@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}ÖGS Erkennung - Dashboard{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+<!-- Pipeline Actions -->
+<div class="card">
+    <h2>Pipeline</h2>
+    <p style="color: #888; margin-bottom: 1rem;">
+        Schritt 1: Videos herunterladen &rarr; Schritt 2: Landmarks extrahieren &rarr; Schritt 3: Modell trainieren
+    </p>
+    <div class="actions">
+        <button class="btn btn-primary" onclick="startDownload()" id="btn-download">
+            1. Videos herunterladen
+        </button>
+        <button class="btn btn-warning" onclick="startExtraction()" id="btn-extract">
+            2. Landmarks extrahieren
+        </button>
+        <button class="btn btn-success" onclick="startTraining()" id="btn-train">
+            3. Modell trainieren
+        </button>
+    </div>
+
+    <div id="progress-section" style="display: none; margin-top: 1rem;">
+        <p id="progress-text"></p>
+        <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+        </div>
+    </div>
+
+    <div id="log-section" style="display: none;">
+        <div class="log-box" id="log-box"></div>
+    </div>
+</div>
+
+<!-- Model Status -->
+<div class="card">
+    <h2>Modell-Status</h2>
+    {% if model_exists %}
+        <p style="color: #66bb6a;">Trainiertes Modell vorhanden - Erkennung bereit!</p>
+        <a href="/recognize" class="btn btn-success" style="margin-top: 0.5rem;">Erkennung starten</a>
+    {% else %}
+        <p style="color: #ffa726;">Kein Modell vorhanden - bitte Pipeline durchlaufen</p>
+    {% endif %}
+</div>
+
+<!-- Signs Overview -->
+<div class="card">
+    <h2>Gebärden-Übersicht ({{ signs|length }} Gebärden, Minimum: {{ min_videos }} Videos)</h2>
+</div>
+
+<div class="grid">
+    {% for sign in signs %}
+    <div class="sign-card">
+        <h3>
+            {{ sign.name }}
+            <span class="badge badge-{{ sign.status }}">
+                {% if sign.status == 'ok' %}OK
+                {% elif sign.status == 'wenig' %}WENIG
+                {% else %}FEHLT{% endif %}
+            </span>
+        </h3>
+        <div class="stats">
+            Videos: {{ sign.videos }} | Aufnahmen: {{ sign.recordings }} | Landmarks: {{ sign.landmarks }}
+        </div>
+        <div class="progress-bar">
+            <div class="progress-fill" style="width: {{ [sign.total / min_videos * 100, 100]|min }}%"></div>
+        </div>
+        <div style="color: #888; font-size: 0.8rem; margin-top: 0.3rem;">
+            {{ sign.total }}/{{ min_videos }}
+            {% if sign.needed > 0 %}
+                (noch {{ sign.needed }} benötigt)
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let pollInterval = null;
+
+function startDownload() {
+    fetch('/api/download', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { alert(data.error); return; }
+            document.getElementById('btn-download').disabled = true;
+            document.getElementById('progress-section').style.display = 'block';
+            document.getElementById('log-section').style.display = 'block';
+            pollProgress('download');
+        });
+}
+
+function startExtraction() {
+    fetch('/api/extract', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { alert(data.error); return; }
+            document.getElementById('btn-extract').disabled = true;
+            document.getElementById('progress-section').style.display = 'block';
+            pollProgress('extract');
+        });
+}
+
+function startTraining() {
+    fetch('/api/train', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) { alert(data.error); return; }
+            document.getElementById('btn-train').disabled = true;
+            document.getElementById('progress-section').style.display = 'block';
+            pollProgress('train');
+        });
+}
+
+function pollProgress(type) {
+    if (pollInterval) clearInterval(pollInterval);
+
+    pollInterval = setInterval(() => {
+        fetch(`/api/${type}/status`)
+            .then(r => r.json())
+            .then(data => {
+                if (type === 'download') {
+                    const pct = data.total_signs > 0
+                        ? (data.completed_signs / data.total_signs * 100)
+                        : 0;
+                    document.getElementById('progress-fill').style.width = pct + '%';
+                    document.getElementById('progress-text').textContent =
+                        `Download: ${data.current_sign || 'Fertig'} (${data.completed_signs}/${data.total_signs})`;
+
+                    const logBox = document.getElementById('log-box');
+                    logBox.innerHTML = data.log.map(l => `<div>${l}</div>`).join('');
+                    logBox.scrollTop = logBox.scrollHeight;
+
+                    if (!data.running && data.completed_signs > 0) {
+                        clearInterval(pollInterval);
+                        document.getElementById('btn-download').disabled = false;
+                        setTimeout(() => location.reload(), 1000);
+                    }
+                } else if (type === 'extract') {
+                    const pct = data.total_signs > 0
+                        ? (data.completed_signs / data.total_signs * 100)
+                        : 0;
+                    document.getElementById('progress-fill').style.width = pct + '%';
+                    document.getElementById('progress-text').textContent =
+                        `Extraktion: ${data.current_sign || '...'} (${data.completed_signs}/${data.total_signs})`;
+
+                    if (!data.running && data.completed_signs > 0) {
+                        clearInterval(pollInterval);
+                        document.getElementById('btn-extract').disabled = false;
+                        setTimeout(() => location.reload(), 1000);
+                    }
+                } else if (type === 'train') {
+                    document.getElementById('progress-text').textContent = data.status || 'Training...';
+                    if (data.running) {
+                        document.getElementById('progress-fill').style.width = '50%';
+                    } else {
+                        document.getElementById('progress-fill').style.width = '100%';
+                        clearInterval(pollInterval);
+                        document.getElementById('btn-train').disabled = false;
+                        setTimeout(() => location.reload(), 1000);
+                    }
+                }
+            });
+    }, 1000);
+}
+</script>
+{% endblock %}

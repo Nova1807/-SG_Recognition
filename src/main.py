@@ -18,6 +18,7 @@ def print_usage() -> None:
 Verwendung: python -m src.main <befehl>
 
 Befehle:
+  start      Web-Interface starten (empfohlen)
   download   Videos von gebaerden-archiv.at herunterladen
   extract    Landmarks aus Videos extrahieren
   train      Erkennungsmodell trainieren
@@ -62,6 +63,13 @@ def cmd_train(sign_list: list[str]) -> None:
     else:
         print("\nModell-Training fehlgeschlagen.")
         sys.exit(1)
+
+
+def cmd_start() -> None:
+    """Start the web interface."""
+    from src.webapp import run_webapp
+
+    run_webapp()
 
 
 def cmd_recognize() -> None:
@@ -132,9 +140,12 @@ def main() -> None:
 
     command = sys.argv[1].lower()
 
-    if command in ("recognize",):
-        if command == "recognize":
-            cmd_recognize()
+    if command == "start":
+        cmd_start()
+        return
+
+    if command == "recognize":
+        cmd_recognize()
         return
 
     sign_list = load_sign_list()

@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+{% block title %}ÖGS Erkennung - Live{% endblock %}
+
+{% block extra_head %}
+<style>
+    .recognition-container {
+        display: flex;
+        gap: 2rem;
+        flex-wrap: wrap;
+    }
+    .video-section {
+        flex: 1;
+        min-width: 400px;
+    }
+    .result-section {
+        flex: 0 0 300px;
+    }
+    #webcam-video {
+        width: 100%;
+        border-radius: 12px;
+        transform: scaleX(-1);
+        background: #000;
+    }
+    .prediction-box {
+        background: #1a1a2e;
+        border-radius: 12px;
+        padding: 2rem;
+        text-align: center;
+        border: 2px solid #16213e;
+    }
+    .prediction-text {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #4fc3f7;
+        margin: 1rem 0;
+    }
+    .confidence-bar {
+        background: #16213e;
+        border-radius: 8px;
+        height: 12px;
+        overflow: hidden;
+        margin-top: 1rem;
+    }
+    .confidence-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #ef5350, #ffa726, #66bb6a);
+        border-radius: 8px;
+        transition: width 0.3s;
+    }
+    .status-indicator {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+    }
+    .status-dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: #888;
+    }
+    .status-dot.active { background: #66bb6a; animation: pulse 1.5s infinite; }
+    .status-dot.detecting { background: #ef5350; animation: pulse 0.5s infinite; }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+    .history {
+        margin-top: 1.5rem;
+    }
+    .history-item {
+        display: flex;
+        justify-content: space-between;
+        padding: 0.5rem;
+        border-bottom: 1px solid #16213e;
+        font-size: 0.9rem;
+    }
+    .canvas-hidden { display: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>Live Gebärden-Erkennung</h1>
+
+<div class="recognition-container">
+    <div class="video-section">
+        <div class="card">
+            <video id="webcam-video" autoplay playsinline></video>
+            <canvas id="capture-canvas" class="canvas-hidden"></canvas>
+            <div style="margin-top: 1rem; display: flex; gap: 1rem; align-items: center;">
+                <button class="btn btn-primary" onclick="toggleRecognition()" id="btn-toggle">
+                    Erkennung starten
+                </button>
+                <button class="btn btn-warning" onclick="resetRecognition()">Reset</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="result-section">
+        <div class="prediction-box">
+            <div class="status-indicator">
+                <div class="status-dot" id="status-dot"></div>
+                <span id="status-text">Webcam wird geladen...</span>
+            </div>
+            <div style="color: #888; font-size: 0.9rem;">Erkannte Gebärde:</div>
+            <div class="prediction-text" id="prediction-text">-</div>
+            <div style="color: #888; font-size: 0.9rem;">Konfidenz:</div>
+            <div class="confidence-bar">
+                <div class="confidence-fill" id="confidence-fill" style="width: 0%"></div>
+            </div>
+            <div id="confidence-text" style="margin-top: 0.5rem; color: #888;">0%</div>
+        </div>
+
+        <div class="card history" style="margin-top: 1rem;">
+            <h3 style="margin-bottom: 0.5rem;">Verlauf</h3>
+            <div id="history-list">
+                <div style="color: #888; font-size: 0.9rem;">Noch keine Gebärden erkannt</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+let isRecognizing = false;
+let landmarkBuffer = [];
+let wasHandsDetected = false;
+let history = [];
+const BUFFER_MIN = 5;
+const video = document.getElementById('webcam-video');
+const canvas = document.getElementById('capture-canvas');
+const ctx = canvas.getContext('2d');
+
+async function initWebcam() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480 }
+        });
+        video.srcObject = stream;
+        document.getElementById('status-dot').classList.add('active');
+        document.getElementById('status-text').textContent = 'Webcam bereit';
+    } catch (err) {
+        document.getElementById('status-text').textContent = 'Webcam-Fehler: ' + err.message;
+    }
+}
+
+function toggleRecognition() {
+    isRecognizing = !isRecognizing;
+    const btn = document.getElementById('btn-toggle');
+    if (isRecognizing) {
+        btn.textContent = 'Erkennung stoppen';
+        btn.classList.remove('btn-primary');
+        btn.classList.add('btn-danger');
+        captureLoop();
+    } else {
+        btn.textContent = 'Erkennung starten';
+        btn.classList.remove('btn-danger');
+        btn.classList.add('btn-primary');
+    }
+}
+
+function resetRecognition() {
+    landmarkBuffer = [];
+    wasHandsDetected = false;
+    document.getElementById('prediction-text').textContent = '-';
+    document.getElementById('confidence-fill').style.width = '0%';
+    document.getElementById('confidence-text').textContent = '0%';
+    document.getElementById('status-dot').className = 'status-dot active';
+}
+
+async function captureLoop() {
+    if (!isRecognizing) return;
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0);
+    const frameData = canvas.toDataURL('image/jpeg', 0.7);
+
+    try {
+        const response = await fetch('/api/recognize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ frame: frameData })
+        });
+        const data = await response.json();
+
+        if (data.error) {
+            document.getElementById('status-text').textContent = data.error;
+            setTimeout(captureLoop, 2000);
+            return;
+        }
+
+        if (data.has_hands) {
+            document.getElementById('status-dot').className = 'status-dot detecting';
+            document.getElementById('status-text').textContent = 'Hände erkannt - aufnehme...';
+            landmarkBuffer.push(data.landmarks);
+            wasHandsDetected = true;
+        } else {
+            if (wasHandsDetected && landmarkBuffer.length >= BUFFER_MIN) {
+                await predictSign();
+            }
+            landmarkBuffer = [];
+            wasHandsDetected = false;
+            document.getElementById('status-dot').className = 'status-dot active';
+            document.getElementById('status-text').textContent = 'Warte auf Gebärde...';
+        }
+    } catch (err) {
+        console.error('Capture error:', err);
+    }
+
+    setTimeout(captureLoop, 150);
+}
+
+async function predictSign() {
+    try {
+        const response = await fetch('/api/predict', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sequences: landmarkBuffer })
+        });
+        const data = await response.json();
+
+        if (data.prediction) {
+            document.getElementById('prediction-text').textContent = data.prediction;
+            const confPct = Math.round(data.confidence * 100);
+            document.getElementById('confidence-fill').style.width = confPct + '%';
+            document.getElementById('confidence-text').textContent = confPct + '%';
+
+            history.unshift({
+                sign: data.prediction,
+                confidence: confPct,
+                time: new Date().toLocaleTimeString()
+            });
+            if (history.length > 10) history.pop();
+            updateHistory();
+        }
+    } catch (err) {
+        console.error('Predict error:', err);
+    }
+}
+
+function updateHistory() {
+    const list = document.getElementById('history-list');
+    if (history.length === 0) {
+        list.innerHTML = '<div style="color: #888; font-size: 0.9rem;">Noch keine Gebärden erkannt</div>';
+        return;
+    }
+    list.innerHTML = history.map(h =>
+        `<div class="history-item">
+            <span>${h.sign} (${h.confidence}%)</span>
+            <span style="color: #888;">${h.time}</span>
+        </div>`
+    ).join('');
+}
+
+initWebcam();
+</script>
+{% endblock %}
