@@ -208,7 +208,15 @@ class DesktopApp:
 
     def _run_pipeline(self) -> None:
         """Run download -> extract -> train pipeline automatically."""
+        import shutil
+        from src.config import LANDMARKS_DIR
         from src.scraper import download_all_signs
+
+        # Always re-extract landmarks to ensure features match current code
+        if LANDMARKS_DIR.exists():
+            shutil.rmtree(LANDMARKS_DIR)
+            LANDMARKS_DIR.mkdir(parents=True, exist_ok=True)
+            print("Alte Landmarks geloescht (Feature-Format aktualisiert)")
 
         self.pipeline_status = "Videos herunterladen..."
         print("\n=== Videos herunterladen ===")
