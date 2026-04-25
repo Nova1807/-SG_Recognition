@@ -325,6 +325,8 @@ class DesktopApp:
                 self.is_hands_active = True
                 self.landmark_buffer.clear()
             self.landmark_buffer.append(landmarks)
+            if len(self.landmark_buffer) >= 10:
+                self._predict()
         else:
             if self.is_hands_active and len(self.landmark_buffer) >= 5:
                 self._predict()
@@ -364,6 +366,11 @@ class DesktopApp:
             cv2.putText(
                 frame, self.pipeline_status,
                 (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 200, 255), 1,
+            )
+        elif self.clf is None:
+            cv2.putText(
+                frame, "Kein Modell - druecke M fuer Aufnahme-Modus",
+                (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 100, 255), 1,
             )
         else:
             status = "Haende erkannt" if self.is_hands_active else "Warte auf Gebaerde..."
