@@ -323,19 +323,18 @@ class DesktopApp:
         if self.clf is None or self.le is None:
             return
         from src.landmark_extractor import pad_or_truncate_sequence
+        from src.trainer import predict_with_features
 
         padded = pad_or_truncate_sequence(
             list(self.landmark_buffer), LANDMARK_SEQUENCE_LENGTH
         )
-        flat = padded.flatten().reshape(1, -1)
-        proba = self.clf.predict_proba(flat)[0]
+        proba = predict_with_features(self.clf, padded)[0]
         max_idx = np.argmax(proba)
         conf = float(proba[max_idx])
 
-        if conf >= 0.3:
-            pred = self.le.inverse_transform([max_idx])[0]
-            self.current_prediction = pred
-            self.confidence = conf
+        pred = self.le.inverse_transform([max_idx])[0]
+        self.current_prediction = pred
+        self.confidence = conf
 
     def _build_recognition_view(self, frame: np.ndarray) -> np.ndarray:
         """Build the recognition overlay on the frame."""
@@ -363,11 +362,22 @@ class DesktopApp:
                 (15, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 255, 100), 1,
             )
 
-        if self.current_prediction:
+        if self.current_prediction and self.clf is not None:
             cv2.rectangle(frame, (0, h - 90), (w, h), (20, 20, 40), -1)
+
+            if self.confidence >= 0.6:
+                pred_color = (100, 255, 100)
+                label = self.current_prediction
+            elif self.confidence >= 0.4:
+                pred_color = (100, 220, 255)
+                label = f"{self.current_prediction} (?)"
+            else:
+                pred_color = (100, 100, 200)
+                label = f"Unsicher: {self.current_prediction}"
+
             cv2.putText(
-                frame, self.current_prediction,
-                (15, h - 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (247, 195, 79), 3,
+                frame, label,
+                (15, h - 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, pred_color, 3,
             )
             conf_text = f"Konfidenz: {self.confidence:.0%}"
             cv2.putText(
@@ -376,8 +386,7 @@ class DesktopApp:
             )
             bar_w = int((w - 30) * self.confidence)
             cv2.rectangle(frame, (15, h - 95), (w - 15, h - 92), (40, 40, 60), -1)
-            bar_color = (100, 255, 100) if self.confidence > 0.7 else (100, 200, 255)
-            cv2.rectangle(frame, (15, h - 95), (15 + bar_w, h - 92), bar_color, -1)
+            cv2.rectangle(frame, (15, h - 95), (15 + bar_w, h - 92), pred_color, -1)
 
         if self.pipeline_done:
             cv2.putText(
