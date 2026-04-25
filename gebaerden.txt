@@ -1,0 +1,10 @@
+Hallo
+Danke
+Bitte
+Ja
+Nein
+Gut
+Schlecht
+Hilfe
+Entschuldigung
+Tschüss
