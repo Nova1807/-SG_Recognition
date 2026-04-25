@@ -165,13 +165,21 @@ class DesktopApp:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 self.last_result = self.detector.process(rgb)
 
-            # Always buffer landmarks and predict if model ready
+            # Buffer landmarks and predict only when hands are visible
             if self.clf is not None and self.last_result and not self.recording_mode:
-                landmarks = extract_landmarks_from_result(self.last_result)
-                self.landmark_buffer.append(landmarks)
-                # Predict every 5 frames for smooth updates
-                if self.frame_count % 5 == 0 and len(self.landmark_buffer) >= 10:
-                    self._predict()
+                has_hands = bool(
+                    self.last_result.left_hand_landmarks
+                    or self.last_result.right_hand_landmarks
+                )
+                if has_hands:
+                    landmarks = extract_landmarks_from_result(self.last_result)
+                    self.landmark_buffer.append(landmarks)
+                    if self.frame_count % 5 == 0 and len(self.landmark_buffer) >= 10:
+                        self._predict()
+                else:
+                    self.landmark_buffer.clear()
+                    self.current_prediction = ""
+                    self.confidence = 0.0
 
             display = frame.copy()
 
