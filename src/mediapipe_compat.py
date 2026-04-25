@@ -40,6 +40,26 @@ def _download_model() -> None:
     print(f"Modell gespeichert: {_MODEL_PATH}")
 
 
+def _flatten_landmarks(lm_data):
+    """Normalize landmark data to a flat list of landmark objects.
+
+    The new tasks API may return landmarks as a flat list or empty list.
+    The legacy API returns NormalizedLandmarkList objects (iterable).
+    This ensures we always get a flat iterable of landmarks or None.
+    """
+    if not lm_data:
+        return None
+    if isinstance(lm_data, list) and len(lm_data) > 0:
+        first = lm_data[0]
+        if isinstance(first, list):
+            return first
+        if hasattr(first, "x"):
+            return lm_data
+    if hasattr(lm_data, "landmark"):
+        return lm_data.landmark
+    return lm_data
+
+
 class HolisticDetector:
     """Wrapper providing a unified interface for both mediapipe API versions."""
 
@@ -84,20 +104,14 @@ class HolisticDetector:
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             results = self._landmarker.detect(mp_image)
             return HolisticResult(
-                left_hand_landmarks=(
-                    results.left_hand_landmarks[0]
-                    if results.left_hand_landmarks
-                    else None
+                left_hand_landmarks=_flatten_landmarks(
+                    results.left_hand_landmarks
                 ),
-                right_hand_landmarks=(
-                    results.right_hand_landmarks[0]
-                    if results.right_hand_landmarks
-                    else None
+                right_hand_landmarks=_flatten_landmarks(
+                    results.right_hand_landmarks
                 ),
-                pose_landmarks=(
-                    results.pose_landmarks[0]
-                    if results.pose_landmarks
-                    else None
+                pose_landmarks=_flatten_landmarks(
+                    results.pose_landmarks
                 ),
             )
 
