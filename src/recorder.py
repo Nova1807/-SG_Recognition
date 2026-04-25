@@ -3,7 +3,6 @@
 import time
 
 import cv2
-import mediapipe as mp
 import numpy as np
 
 from src.config import (
@@ -14,11 +13,8 @@ from src.config import (
     WEBCAM_INDEX,
     ensure_dirs,
 )
+from src.mediapipe_compat import HolisticDetector, draw_landmarks_on_frame
 from src.scraper import _sanitize_dirname, get_recording_count, get_video_count
-
-mp_holistic = mp.solutions.holistic
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
 
 
 def get_signs_needing_data(sign_list: list[str]) -> list[dict[str, object]]:
@@ -76,10 +72,10 @@ def run_recording_mode(sign_list: list[str]) -> None:
     print("  P = Vorherige Gebärde")
     print("  Q = Beenden")
 
-    with mp_holistic.Holistic(
+    with HolisticDetector(
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5,
-    ) as holistic:
+    ) as detector:
         while cap.isOpened() and current_sign_idx < len(signs_needing_data):
             sign_info = signs_needing_data[current_sign_idx]
             sign_name = sign_info["name"]
@@ -92,8 +88,8 @@ def run_recording_mode(sign_list: list[str]) -> None:
             display_frame = frame.copy()
 
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = holistic.process(image_rgb)
-            _draw_landmarks_on_frame(display_frame, results)
+            result = detector.process(image_rgb)
+            draw_landmarks_on_frame(display_frame, result)
 
             _draw_recording_ui(
                 display_frame, sign_name, sign_info, current_sign_idx,
@@ -106,7 +102,7 @@ def run_recording_mode(sign_list: list[str]) -> None:
             if key == ord("q"):
                 break
             elif key == ord(" "):
-                _record_sign(cap, holistic, sign_name)
+                _record_sign(cap, sign_name)
                 sign_info["recordings"] = get_recording_count(sign_name)
                 sign_info["total"] = sign_info["videos"] + sign_info["recordings"]
                 sign_info["needed"] = max(0, MIN_VIDEOS_PER_SIGN - sign_info["total"])
@@ -124,7 +120,6 @@ def run_recording_mode(sign_list: list[str]) -> None:
 
 def _record_sign(
     cap: cv2.VideoCapture,
-    holistic: mp_holistic.Holistic,
     sign_name: str,
 ) -> None:
     """Record a single sign performance."""
@@ -208,26 +203,6 @@ def _record_sign(
 
     out.release()
     print(f"  Aufnahme gespeichert: {save_path}")
-
-
-def _draw_landmarks_on_frame(frame: np.ndarray, results: object) -> None:
-    """Draw hand and pose landmarks on frame."""
-    if results.left_hand_landmarks:
-        mp_drawing.draw_landmarks(
-            frame,
-            results.left_hand_landmarks,
-            mp_holistic.HAND_CONNECTIONS,
-            mp_drawing_styles.get_default_hand_landmarks_style(),
-            mp_drawing_styles.get_default_hand_connections_style(),
-        )
-    if results.right_hand_landmarks:
-        mp_drawing.draw_landmarks(
-            frame,
-            results.right_hand_landmarks,
-            mp_holistic.HAND_CONNECTIONS,
-            mp_drawing_styles.get_default_hand_landmarks_style(),
-            mp_drawing_styles.get_default_hand_connections_style(),
-        )
 
 
 def _draw_recording_ui(

@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import cv2
-import mediapipe as mp
 import numpy as np
 from tqdm import tqdm
 
@@ -14,44 +13,20 @@ from src.config import (
     VIDEOS_DIR,
     ensure_dirs,
 )
+from src.mediapipe_compat import HolisticDetector, extract_landmarks_from_result
 from src.scraper import _sanitize_dirname
-
-mp_holistic = mp.solutions.holistic
-mp_drawing = mp.solutions.drawing_utils
 
 
 def extract_landmarks_from_frame(
-    frame: np.ndarray, holistic: mp_holistic.Holistic
+    frame: np.ndarray, detector: HolisticDetector
 ) -> np.ndarray | None:
     """Extract hand and pose landmarks from a single frame.
 
     Returns a flattened numpy array of landmarks, or None if no landmarks detected.
     """
     image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    image_rgb.flags.writeable = False
-    results = holistic.process(image_rgb)
-
-    landmarks = []
-
-    if results.left_hand_landmarks:
-        for lm in results.left_hand_landmarks.landmark:
-            landmarks.extend([lm.x, lm.y, lm.z])
-    else:
-        landmarks.extend([0.0] * 63)
-
-    if results.right_hand_landmarks:
-        for lm in results.right_hand_landmarks.landmark:
-            landmarks.extend([lm.x, lm.y, lm.z])
-    else:
-        landmarks.extend([0.0] * 63)
-
-    if results.pose_landmarks:
-        for lm in results.pose_landmarks.landmark:
-            landmarks.extend([lm.x, lm.y, lm.z, lm.visibility])
-    else:
-        landmarks.extend([0.0] * 132)
-
-    return np.array(landmarks)
+    result = detector.process(image_rgb)
+    return extract_landmarks_from_result(result)
 
 
 def extract_landmarks_from_video(video_path: Path) -> list[np.ndarray]:
@@ -63,16 +38,16 @@ def extract_landmarks_from_video(video_path: Path) -> list[np.ndarray]:
 
     frames_landmarks = []
 
-    with mp_holistic.Holistic(
+    with HolisticDetector(
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5,
-    ) as holistic:
+    ) as detector:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
 
-            landmarks = extract_landmarks_from_frame(frame, holistic)
+            landmarks = extract_landmarks_from_frame(frame, detector)
             if landmarks is not None:
                 frames_landmarks.append(landmarks)
 

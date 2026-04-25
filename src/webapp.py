@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 import cv2
-import mediapipe as mp
 import numpy as np
 from flask import Flask, Response, jsonify, render_template, request
 
@@ -21,6 +20,7 @@ from src.config import (
     load_sign_list,
 )
 from src.landmark_extractor import extract_landmarks_from_frame, pad_or_truncate_sequence
+from src.mediapipe_compat import HolisticDetector
 from src.scraper import (
     _sanitize_dirname,
     get_recording_count,
@@ -33,8 +33,6 @@ app = Flask(
     template_folder=str(Path(__file__).parent.parent / "templates"),
     static_folder=str(Path(__file__).parent.parent / "static"),
 )
-
-mp_holistic = mp.solutions.holistic
 
 download_progress: dict[str, object] = {
     "running": False,
@@ -280,8 +278,6 @@ def api_recognize():
     if result is None:
         return jsonify({"error": "Kein Modell geladen"}), 400
 
-    clf, le = result
-
     img_data = data["frame"].split(",")[1] if "," in data["frame"] else data["frame"]
     img_bytes = base64.b64decode(img_data)
     nparr = np.frombuffer(img_bytes, np.uint8)
@@ -290,11 +286,11 @@ def api_recognize():
     if frame is None:
         return jsonify({"error": "Frame konnte nicht dekodiert werden"}), 400
 
-    with mp_holistic.Holistic(
+    with HolisticDetector(
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5,
-    ) as holistic:
-        landmarks = extract_landmarks_from_frame(frame, holistic)
+    ) as detector:
+        landmarks = extract_landmarks_from_frame(frame, detector)
 
     if landmarks is None:
         return jsonify({"prediction": None, "confidence": 0})

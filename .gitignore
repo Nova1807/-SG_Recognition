@@ -16,6 +16,7 @@ data/recordings/
 data/landmarks/
 models/*.pkl
 models/*.joblib
+models/*.task
 
 # IDE
 .vscode/

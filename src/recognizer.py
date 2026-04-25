@@ -3,7 +3,6 @@
 from collections import deque
 
 import cv2
-import mediapipe as mp
 import numpy as np
 
 from src.config import (
@@ -11,11 +10,8 @@ from src.config import (
     WEBCAM_INDEX,
 )
 from src.landmark_extractor import extract_landmarks_from_frame
+from src.mediapipe_compat import HolisticDetector, draw_landmarks_on_frame
 from src.trainer import load_model
-
-mp_holistic = mp.solutions.holistic
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
 
 
 def run_recognition() -> None:
@@ -43,10 +39,10 @@ def run_recognition() -> None:
     confidence = 0.0
     is_recording_gesture = False
 
-    with mp_holistic.Holistic(
+    with HolisticDetector(
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5,
-    ) as holistic:
+    ) as detector:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
@@ -55,7 +51,7 @@ def run_recognition() -> None:
             frame = cv2.flip(frame, 1)
             display_frame = frame.copy()
 
-            landmarks = extract_landmarks_from_frame(frame, holistic)
+            landmarks = extract_landmarks_from_frame(frame, detector)
             if landmarks is not None:
                 hand_data = landmarks[:126]
                 has_hands = np.any(hand_data != 0)
@@ -76,10 +72,8 @@ def run_recognition() -> None:
                     is_recording_gesture = False
 
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image_rgb.flags.writeable = False
-            results = holistic.process(image_rgb)
-
-            _draw_landmarks(display_frame, results)
+            result_lm = detector.process(image_rgb)
+            draw_landmarks_on_frame(display_frame, result_lm)
 
             _draw_ui(display_frame, current_prediction, confidence,
                      len(landmark_buffer), is_recording_gesture)
@@ -120,33 +114,6 @@ def _predict_sign(
     return prediction, conf
 
 
-def _draw_landmarks(frame: np.ndarray, results: object) -> None:
-    """Draw hand and pose landmarks on the frame."""
-    if results.left_hand_landmarks:
-        mp_drawing.draw_landmarks(
-            frame,
-            results.left_hand_landmarks,
-            mp_holistic.HAND_CONNECTIONS,
-            mp_drawing_styles.get_default_hand_landmarks_style(),
-            mp_drawing_styles.get_default_hand_connections_style(),
-        )
-    if results.right_hand_landmarks:
-        mp_drawing.draw_landmarks(
-            frame,
-            results.right_hand_landmarks,
-            mp_holistic.HAND_CONNECTIONS,
-            mp_drawing_styles.get_default_hand_landmarks_style(),
-            mp_drawing_styles.get_default_hand_connections_style(),
-        )
-    if results.pose_landmarks:
-        mp_drawing.draw_landmarks(
-            frame,
-            results.pose_landmarks,
-            mp_holistic.POSE_CONNECTIONS,
-            landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style(),
-        )
-
-
 def _draw_ui(
     frame: np.ndarray,
     prediction: str,
@@ -169,22 +136,36 @@ def _draw_ui(
         2,
     )
 
+    status = "Aufnahme..." if is_recording else "Warte auf Gebärde..."
+    color = (0, 0, 255) if is_recording else (0, 255, 0)
+    cv2.putText(
+        frame,
+        f"Status: {status} ({buffer_size} Frames)",
+        (10, 60),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        color,
+        1,
+    )
+
     if prediction:
-        text = f"Erkannt: {prediction} ({confidence:.0%})"
-        color = (0, 255, 0) if confidence > 0.6 else (0, 255, 255)
+        cv2.rectangle(frame, (0, h - 100), (w, h), (0, 0, 0), -1)
         cv2.putText(
-            frame, text, (10, 65),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2,
+            frame,
+            prediction,
+            (10, h - 55),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.5,
+            (0, 255, 255),
+            3,
         )
-
-    status_color = (0, 0, 255) if is_recording else (128, 128, 128)
-    status_text = f"Aufnahme... ({buffer_size} Frames)" if is_recording else "Warte auf Gebärde..."
-    cv2.putText(
-        frame, status_text, (10, h - 20),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 1,
-    )
-
-    cv2.putText(
-        frame, "Q=Beenden  R=Reset", (w - 200, h - 20),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1,
-    )
+        conf_text = f"Konfidenz: {confidence:.0%}"
+        cv2.putText(
+            frame,
+            conf_text,
+            (10, h - 15),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (200, 200, 200),
+            2,
+        )
