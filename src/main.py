@@ -69,7 +69,12 @@ def cmd_start() -> None:
     """Start the web interface."""
     from src.webapp import run_webapp
 
-    run_webapp()
+    port = 5000
+    for i, arg in enumerate(sys.argv):
+        if arg == "--port" and i + 1 < len(sys.argv):
+            port = int(sys.argv[i + 1])
+
+    run_webapp(port=port)
 
 
 def cmd_recognize() -> None:
