@@ -129,28 +129,48 @@ class HolisticDetector:
         self.close()
 
 
+def _normalize_hand(hand_landmarks) -> list[float]:
+    """Normalize hand landmarks relative to wrist, scale-invariant.
+
+    Returns 63 values (21 landmarks * 3 coords), normalized so that:
+    - Wrist is at origin (0, 0, 0)
+    - Hand is scaled so max distance from wrist = 1.0
+    """
+    if not hand_landmarks:
+        return [0.0] * 63
+
+    coords = [(lm.x, lm.y, lm.z) for lm in hand_landmarks]
+    wrist = coords[0]
+
+    # Translate: wrist to origin
+    relative = [(x - wrist[0], y - wrist[1], z - wrist[2]) for x, y, z in coords]
+
+    # Scale: normalize by max distance from wrist
+    max_dist = max(
+        (x**2 + y**2 + z**2) ** 0.5 for x, y, z in relative[1:]
+    )
+    if max_dist > 1e-6:
+        relative = [(x / max_dist, y / max_dist, z / max_dist) for x, y, z in relative]
+
+    result: list[float] = []
+    for x, y, z in relative:
+        result.extend([x, y, z])
+    return result
+
+
 def extract_landmarks_from_result(result: HolisticResult) -> np.ndarray:
-    """Extract a flat landmark array from a HolisticResult.
+    """Extract a normalized flat landmark array from a HolisticResult.
 
     Returns a flattened numpy array:
-    - Left hand: 21 landmarks * 3 (x,y,z) = 63
-    - Right hand: 21 landmarks * 3 (x,y,z) = 63
+    - Left hand: 21 landmarks * 3 (x,y,z) = 63 (normalized to wrist)
+    - Right hand: 21 landmarks * 3 (x,y,z) = 63 (normalized to wrist)
     - Pose: 33 landmarks * 4 (x,y,z,visibility) = 132
     Total: 258 values
     """
     landmarks: list[float] = []
 
-    if result.left_hand_landmarks:
-        for lm in result.left_hand_landmarks:
-            landmarks.extend([lm.x, lm.y, lm.z])
-    else:
-        landmarks.extend([0.0] * 63)
-
-    if result.right_hand_landmarks:
-        for lm in result.right_hand_landmarks:
-            landmarks.extend([lm.x, lm.y, lm.z])
-    else:
-        landmarks.extend([0.0] * 63)
+    landmarks.extend(_normalize_hand(result.left_hand_landmarks))
+    landmarks.extend(_normalize_hand(result.right_hand_landmarks))
 
     if result.pose_landmarks:
         for lm in result.pose_landmarks:

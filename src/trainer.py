@@ -24,7 +24,7 @@ def _augment_sequence(sequence: np.ndarray, n_augments: int = 5) -> list[np.ndar
     - [126:258] pose (33 landmarks * xyzv)
     """
     augmented = [sequence]
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng()
 
     for _ in range(n_augments):
         aug = sequence.copy()
