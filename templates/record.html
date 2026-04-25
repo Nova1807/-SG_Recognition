@@ -185,6 +185,10 @@ let webcamStream = null;
 const RECORD_DURATION = {{ recording_duration }} * 1000;
 
 async function initWebcam() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        alert('Webcam nicht verfügbar. Bitte öffne die Seite über http://localhost:' + location.port);
+        return;
+    }
     try {
         webcamStream = await navigator.mediaDevices.getUserMedia({
             video: { width: 640, height: 480 }

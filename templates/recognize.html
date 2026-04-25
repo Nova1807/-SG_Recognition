@@ -133,6 +133,11 @@ const canvas = document.getElementById('capture-canvas');
 const ctx = canvas.getContext('2d');
 
 async function initWebcam() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        document.getElementById('status-text').textContent =
+            'Webcam nicht verfügbar. Bitte öffne die Seite über http://localhost:' + location.port;
+        return;
+    }
     try {
         const stream = await navigator.mediaDevices.getUserMedia({
             video: { width: 640, height: 480 }

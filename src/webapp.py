@@ -399,7 +399,7 @@ def api_status():
     return jsonify(signs_data)
 
 
-def run_webapp(host: str = "0.0.0.0", port: int = 5000, debug: bool = False) -> None:
+def run_webapp(host: str = "127.0.0.1", port: int = 5000, debug: bool = False) -> None:
     """Start the Flask web application."""
     ensure_dirs()
     print(f"\n{'='*50}")
