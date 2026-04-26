@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Video Upload</title>
+</head>
+<body>
+    <h1>Video-Upload Erkennung</h1>
+
+    <input type="file" id="videoInput" accept="video/*">
+    <button onclick="uploadVideo()">Erkennen</button>
+
+    <pre id="result"></pre>
+
+    <script>
+        async function uploadVideo() {
+            const input = document.getElementById("videoInput");
+            const resultBox = document.getElementById("result");
+
+            if (!input.files.length) {
+                resultBox.textContent = "Bitte ein Video auswählen.";
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append("video", input.files[0]);
+
+            resultBox.textContent = "Analysiere Video...";
+
+            const response = await fetch("/api/predict_video", {
+                method: "POST",
+                body: formData
+            });
+
+            const data = await response.json();
+            resultBox.textContent = JSON.stringify(data, null, 2);
+        }
+    </script>
+</body>
+</html>

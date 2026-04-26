@@ -1,3 +1,13 @@
+import string
+
+# Hilfsfunktionen für sichere Dateinamen/Ordnernamen
+def _sanitize_dirname(name: str) -> str:
+    valid_chars = f"-_.() {string.ascii_letters}{string.digits}"
+    return ''.join(c for c in name if c in valid_chars).replace(' ', '_')
+
+def _sanitize_filename(name: str) -> str:
+    valid_chars = f"-_.() {string.ascii_letters}{string.digits}"
+    return ''.join(c for c in name if c in valid_chars).replace(' ', '_')
 """Scraper for downloading sign language videos from gebaerden-archiv.at."""
 
 import re
@@ -136,6 +146,7 @@ def download_all_signs(sign_list: list[str]) -> dict[str, int]:
         existing = list(sign_dir.glob("*.mp4"))
         print(f"  Bereits vorhanden: {len(existing)} Videos")
 
+
         results = search_sign_videos(sign_name)
         print(f"  Gefunden: {len(results)} Videos auf gebaerden-archiv.at")
 
@@ -144,6 +155,10 @@ def download_all_signs(sign_list: list[str]) -> dict[str, int]:
             filename = f"{result['sign_id']}_{result['source']}.mp4"
             filename = _sanitize_filename(filename)
             save_path = sign_dir / filename
+
+            if save_path.exists():
+                # Datei existiert schon, überspringen
+                continue
 
             if download_video(result["video_url"], save_path):
                 downloaded += 1
@@ -159,6 +174,7 @@ def download_all_signs(sign_list: list[str]) -> dict[str, int]:
 
 def get_video_count(sign_name: str) -> int:
     """Get the number of downloaded videos for a sign."""
+    from src.config import VIDEOS_DIR
     sign_dir = VIDEOS_DIR / _sanitize_dirname(sign_name)
     if not sign_dir.exists():
         return 0
@@ -168,18 +184,11 @@ def get_video_count(sign_name: str) -> int:
 def get_recording_count(sign_name: str) -> int:
     """Get the number of recordings for a sign."""
     from src.config import RECORDINGS_DIR
-
     sign_dir = RECORDINGS_DIR / _sanitize_dirname(sign_name)
     if not sign_dir.exists():
         return 0
-    return len(list(sign_dir.glob("*.mp4")))
+    try:
+        return len(list(sign_dir.glob("*.mp4")))
+    except Exception:
+        return 0
 
-
-def _sanitize_dirname(name: str) -> str:
-    """Sanitize a sign name for use as a directory name."""
-    return re.sub(r'[<>:"/\\|?*]', "_", name).strip()
-
-
-def _sanitize_filename(name: str) -> str:
-    """Sanitize a filename."""
-    return re.sub(r'[<>:"/\\|?*\s]', "_", name).strip()

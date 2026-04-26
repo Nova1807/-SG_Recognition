@@ -7,9 +7,13 @@ import numpy as np
 from tqdm import tqdm
 
 from src.config import (
-    LANDMARKS_DIR,
+    FEATURES_PER_FRAME,
     LANDMARK_SEQUENCE_LENGTH,
+    LANDMARKS_DIR,
+    LEFT_PRESENT_IDX,
+    PRIMARY_PRESENT_IDX,
     RECORDINGS_DIR,
+    RIGHT_PRESENT_IDX,
     VIDEOS_DIR,
     ensure_dirs,
 )
@@ -20,13 +24,20 @@ from src.scraper import _sanitize_dirname
 def extract_landmarks_from_frame(
     frame: np.ndarray, detector: HolisticDetector
 ) -> np.ndarray | None:
-    """Extract hand and pose landmarks from a single frame.
-
-    Returns a flattened numpy array of landmarks, or None if no landmarks detected.
-    """
+    """Extract normalized hand features from a single frame."""
     image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     result = detector.process(image_rgb)
-    return extract_landmarks_from_result(result)
+    landmarks = extract_landmarks_from_result(result)
+
+    has_any_hand = bool(
+        landmarks[PRIMARY_PRESENT_IDX]
+        or landmarks[LEFT_PRESENT_IDX]
+        or landmarks[RIGHT_PRESENT_IDX]
+    )
+    if not has_any_hand:
+        return None
+
+    return landmarks.astype(np.float32)
 
 
 def extract_landmarks_from_video(video_path: Path) -> list[np.ndarray]:
@@ -36,7 +47,7 @@ def extract_landmarks_from_video(video_path: Path) -> list[np.ndarray]:
         print(f"  [FEHLER] Video konnte nicht geöffnet werden: {video_path}")
         return []
 
-    frames_landmarks = []
+    frames_landmarks: list[np.ndarray] = []
 
     with HolisticDetector(
         min_detection_confidence=0.5,
@@ -60,20 +71,19 @@ def pad_or_truncate_sequence(
 ) -> np.ndarray:
     """Pad or truncate a landmark sequence to a fixed length."""
     if len(sequence) == 0:
-        from src.config import FEATURES_PER_FRAME
-        return np.zeros((target_length, FEATURES_PER_FRAME))
+        return np.zeros((target_length, FEATURES_PER_FRAME), dtype=np.float32)
 
     feature_size = sequence[0].shape[0]
 
     if len(sequence) >= target_length:
         step = len(sequence) / target_length
         indices = [int(i * step) for i in range(target_length)]
-        return np.array([sequence[idx] for idx in indices])
-    else:
-        padded = list(sequence)
-        while len(padded) < target_length:
-            padded.append(np.zeros(feature_size))
-        return np.array(padded)
+        return np.array([sequence[idx] for idx in indices], dtype=np.float32)
+
+    padded = list(sequence)
+    while len(padded) < target_length:
+        padded.append(np.zeros(feature_size, dtype=np.float32))
+    return np.array(padded, dtype=np.float32)
 
 
 def extract_all_landmarks(sign_list: list[str]) -> None:
@@ -123,13 +133,7 @@ def extract_all_landmarks(sign_list: list[str]) -> None:
 def load_training_data(
     sign_list: list[str],
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Load all landmark data for training.
-
-    Returns (X, y, labels) where:
-    - X: array of shape (n_samples, sequence_length, features)
-    - y: array of integer labels
-    - labels: list of sign names corresponding to label indices
-    """
+    """Load all landmark data for training."""
     all_sequences = []
     all_labels = []
     label_names = []
@@ -149,11 +153,15 @@ def load_training_data(
         label_names.append(sign_name)
 
         for npy_file in npy_files:
-            sequence = np.load(npy_file)
+            sequence = np.load(npy_file).astype(np.float32)
             all_sequences.append(sequence)
             all_labels.append(label_idx)
 
     if not all_sequences:
         return np.array([]), np.array([]), []
 
-    return np.array(all_sequences), np.array(all_labels), label_names
+    return (
+        np.array(all_sequences, dtype=np.float32),
+        np.array(all_labels, dtype=np.int64),
+        label_names,
+    )

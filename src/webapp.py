@@ -8,18 +8,19 @@ from pathlib import Path
 import cv2
 import numpy as np
 from flask import Flask, Response, jsonify, render_template, request
+from werkzeug.utils import secure_filename
 
 from src.config import (
     LANDMARKS_DIR,
-    LANDMARK_SEQUENCE_LENGTH,
     MIN_VIDEOS_PER_SIGN,
     RECORDINGS_DIR,
     RECORDING_DURATION_SECONDS,
+    UPLOADS_DIR,
     VIDEOS_DIR,
     ensure_dirs,
     load_sign_list,
 )
-from src.landmark_extractor import extract_landmarks_from_frame, pad_or_truncate_sequence
+from src.landmark_extractor import extract_landmarks_from_frame
 from src.mediapipe_compat import HolisticDetector
 from src.scraper import (
     _sanitize_dirname,
@@ -61,6 +62,7 @@ def index():
     """Dashboard page."""
     sign_list = load_sign_list()
     signs_data = []
+
     for sign_name in sign_list:
         videos = get_video_count(sign_name)
         recordings = get_recording_count(sign_name)
@@ -96,11 +98,18 @@ def recognize_page():
     return render_template("recognize.html")
 
 
+@app.route("/upload")
+def upload_page():
+    """Video upload recognition page."""
+    return render_template("upload.html")
+
+
 @app.route("/record")
 def record_page():
     """Recording page."""
     sign_list = load_sign_list()
     signs_data = []
+
     for sign_name in sign_list:
         videos = get_video_count(sign_name)
         recordings = get_recording_count(sign_name)
@@ -178,6 +187,7 @@ def api_download():
             sign_dir.mkdir(parents=True, exist_ok=True)
 
             from src.scraper import download_video
+
             for result in results:
                 filename = f"{result['sign_id']}_{result['source']}.mp4"
                 filename = filename.replace(" ", "_")
@@ -253,6 +263,7 @@ def api_train():
             training_progress["status"] = "Training abgeschlossen!"
         else:
             training_progress["status"] = "Training fehlgeschlagen - nicht genug Daten"
+
         training_progress["running"] = False
 
     thread = threading.Thread(target=run_training, daemon=True)
@@ -268,7 +279,7 @@ def api_train_status():
 
 @app.route("/api/recognize", methods=["POST"])
 def api_recognize():
-    """Recognize a sign from a webcam frame (sent as base64 image)."""
+    """Extract landmarks from a webcam frame sent as base64 image."""
     data = request.get_json()
     if not data or "frame" not in data:
         return jsonify({"error": "Kein Frame erhalten"}), 400
@@ -293,12 +304,6 @@ def api_recognize():
         landmarks = extract_landmarks_from_frame(frame, detector)
 
     if landmarks is None:
-        return jsonify({"prediction": None, "confidence": 0})
-
-    hand_data = landmarks[:126]
-    has_hands = bool(np.any(hand_data != 0))
-
-    if not has_hands:
         return jsonify({"prediction": None, "confidence": 0, "has_hands": False})
 
     return jsonify({
@@ -314,26 +319,50 @@ def api_predict():
     if not data or "sequences" not in data:
         return jsonify({"error": "Keine Sequenzen"}), 400
 
-    from src.trainer import load_model
-    result = load_model()
-    if result is None:
-        return jsonify({"error": "Kein Modell"}), 400
+    sequences = [np.array(s, dtype=np.float32) for s in data["sequences"]]
 
-    clf, le = result
+    from src.recognizer import predict_sequence
+    result = predict_sequence(sequences)
 
-    sequences = [np.array(s) for s in data["sequences"]]
-    padded = pad_or_truncate_sequence(sequences, LANDMARK_SEQUENCE_LENGTH)
-    flat = padded.flatten().reshape(1, -1)
+    if "error" in result:
+        return jsonify(result), 400
 
-    proba = clf.predict_proba(flat)[0]
-    max_idx = np.argmax(proba)
-    conf = float(proba[max_idx])
+    return jsonify(result)
 
-    if conf < 0.3:
-        return jsonify({"prediction": None, "confidence": 0})
 
-    prediction = le.inverse_transform([max_idx])[0]
-    return jsonify({"prediction": prediction, "confidence": conf})
+@app.route("/api/predict_video", methods=["POST"])
+def api_predict_video():
+    """Predict a sign from an uploaded video file."""
+    if "video" not in request.files:
+        return jsonify({"error": "Kein Video erhalten"}), 400
+
+    video_file = request.files["video"]
+    if not video_file.filename:
+        return jsonify({"error": "Ungültiger Dateiname"}), 400
+
+    ensure_dirs()
+
+    filename = secure_filename(video_file.filename)
+    timestamp = int(time.time() * 1000)
+    save_path = UPLOADS_DIR / f"{timestamp}_{filename}"
+    video_file.save(save_path)
+
+    if save_path.suffix.lower() == ".webm":
+        _convert_webm_to_mp4(save_path)
+        mp4_path = save_path.with_suffix(".mp4")
+        if mp4_path.exists():
+            save_path = mp4_path
+
+    from src.recognizer import predict_video_file
+    result = predict_video_file(save_path)
+
+    try:
+        if save_path.exists():
+            save_path.unlink()
+    except OSError:
+        pass
+
+    return jsonify(result)
 
 
 @app.route("/api/save_recording", methods=["POST"])
@@ -367,6 +396,7 @@ def api_save_recording():
 def _convert_webm_to_mp4(webm_path: Path) -> None:
     """Convert a webm recording to mp4 for consistency."""
     import subprocess
+
     mp4_path = webm_path.with_suffix(".mp4")
     try:
         subprocess.run(
@@ -385,6 +415,7 @@ def api_status():
     """Get status of all signs."""
     sign_list = load_sign_list()
     signs_data = []
+
     for sign_name in sign_list:
         videos = get_video_count(sign_name)
         recordings = get_recording_count(sign_name)
@@ -396,14 +427,15 @@ def api_status():
             "total": total,
             "needed": max(0, MIN_VIDEOS_PER_SIGN - total),
         })
+
     return jsonify(signs_data)
 
 
 def run_webapp(host: str = "127.0.0.1", port: int = 5000, debug: bool = False) -> None:
     """Start the Flask web application."""
     ensure_dirs()
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print("  ÖGS Gebärden-Erkennung")
     print(f"  Web-Interface: http://localhost:{port}")
-    print(f"{'='*50}\n")
+    print(f"{'=' * 50}\n")
     app.run(host=host, port=port, debug=debug)

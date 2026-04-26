@@ -1,25 +1,71 @@
-"""Live webcam sign language recognition."""
-
 from collections import deque
 
 import cv2
 import numpy as np
 
 from src.config import (
+    DISPLAY_CONFIDENCE_THRESHOLD,
     LANDMARK_SEQUENCE_LENGTH,
+    LEFT_PRESENT_IDX,
+    PRIMARY_PRESENT_IDX,
+    REJECT_CONFIDENCE_THRESHOLD,
+    RIGHT_PRESENT_IDX,
     WEBCAM_INDEX,
 )
-from src.landmark_extractor import extract_landmarks_from_frame
-from src.mediapipe_compat import HolisticDetector, draw_landmarks_on_frame
-from src.trainer import load_model
+from src.landmark_extractor import (
+    extract_landmarks_from_video,
+    pad_or_truncate_sequence,
+)
+def predict_sequence(sequence: list[np.ndarray] | np.ndarray) -> dict[str, object]:
+    result = load_model()
+    if result is None:
+        return {"error": "Kein Modell geladen"}
+
+    clf, le = result
+
+    if isinstance(sequence, list):
+        if not sequence:
+            return {"prediction": None, "confidence": 0.0}
+        sequence = pad_or_truncate_sequence(sequence, LANDMARK_SEQUENCE_LENGTH)
+
+    proba = predict_with_features(clf, sequence)[0]
+    max_idx = int(np.argmax(proba))
+    conf = float(proba[max_idx])
+    pred = le.inverse_transform([max_idx])[0]
+
+    if conf < REJECT_CONFIDENCE_THRESHOLD or pred == "unknown":
+        return {"prediction": None, "confidence": 0.0}
+
+    return {"prediction": pred, "confidence": conf}
+
+
+def predict_video_file(video_path: str | Path) -> dict[str, object]:
+    video_path = Path(video_path)
+    landmarks = extract_landmarks_from_video(video_path)
+
+    if not landmarks:
+        return {
+            "prediction": None,
+            "confidence": 0.0,
+            "frames_used": 0,
+            "error": "Keine Hand erkannt",
+        }
+
+    result = predict_sequence(landmarks)
+    result["frames_used"] = len(landmarks)
+    return result
+from src.mediapipe_compat import (
+    HolisticDetector,
+    draw_landmarks_on_frame,
+    extract_landmarks_from_result,
+)
+from src.trainer import load_model, predict_with_features
 
 
 def run_recognition() -> None:
-    """Start live webcam recognition."""
     result = load_model()
     if result is None:
         return
-
     clf, le = result
 
     cap = cv2.VideoCapture(WEBCAM_INDEX)
@@ -27,17 +73,9 @@ def run_recognition() -> None:
         print("[FEHLER] Webcam konnte nicht geöffnet werden!")
         return
 
-    print("\n" + "=" * 50)
-    print("LIVE GEBÄRDEN-ERKENNUNG")
-    print("=" * 50)
-    print("Drücke 'q' zum Beenden")
-    print("Drücke 'r' um die Erkennung zurückzusetzen")
-    print()
-
     landmark_buffer: deque[np.ndarray] = deque(maxlen=LANDMARK_SEQUENCE_LENGTH)
     current_prediction = ""
     confidence = 0.0
-    is_recording_gesture = False
 
     with HolisticDetector(
         min_detection_confidence=0.5,
@@ -48,42 +86,56 @@ def run_recognition() -> None:
             if not ret:
                 break
 
-            frame = cv2.flip(frame, 1)
-            display_frame = frame.copy()
-
-            landmarks = extract_landmarks_from_frame(frame, detector)
-            if landmarks is not None:
-                hand_data = landmarks[:126]
-                has_hands = np.any(hand_data != 0)
-
-                if has_hands:
-                    if not is_recording_gesture:
-                        is_recording_gesture = True
-                        landmark_buffer.clear()
-                    landmark_buffer.append(landmarks)
-                else:
-                    if is_recording_gesture and len(landmark_buffer) >= 5:
-                        prediction, conf = _predict_sign(
-                            list(landmark_buffer), clf, le
-                        )
-                        if prediction:
-                            current_prediction = prediction
-                            confidence = conf
-                    is_recording_gesture = False
-
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             result_lm = detector.process(image_rgb)
-            draw_landmarks_on_frame(display_frame, result_lm)
+            landmarks = extract_landmarks_from_result(result_lm)
 
-            _draw_ui(display_frame, current_prediction, confidence,
-                     len(landmark_buffer), is_recording_gesture)
+            has_hands = bool(
+                landmarks[PRIMARY_PRESENT_IDX]
+                or landmarks[LEFT_PRESENT_IDX]
+                or landmarks[RIGHT_PRESENT_IDX]
+            )
+
+            if has_hands:
+                landmark_buffer.append(landmarks.astype(np.float32))
+
+                if len(landmark_buffer) >= 10:
+                    padded = pad_or_truncate_sequence(
+                        list(landmark_buffer),
+                        LANDMARK_SEQUENCE_LENGTH,
+                    )
+                    proba = predict_with_features(clf, padded)[0]
+                    max_idx = int(np.argmax(proba))
+                    conf = float(proba[max_idx])
+                    pred = le.inverse_transform([max_idx])[0]
+
+                    if conf >= REJECT_CONFIDENCE_THRESHOLD and pred != "unknown":
+                        current_prediction = pred
+                        confidence = conf
+                    else:
+                        current_prediction = ""
+                        confidence = 0.0
+            else:
+                landmark_buffer.clear()
+                current_prediction = ""
+                confidence = 0.0
+
+            display_frame = frame.copy()
+            draw_landmarks_on_frame(display_frame, result_lm)
+            display_frame = cv2.flip(display_frame, 1)
+
+            _draw_ui(
+                display_frame,
+                current_prediction,
+                confidence,
+                len(landmark_buffer),
+            )
 
             cv2.imshow("OeGS Erkennung", display_frame)
-
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
-            elif key == ord("r"):
+            if key == ord("r"):
                 landmark_buffer.clear()
                 current_prediction = ""
                 confidence = 0.0
@@ -92,40 +144,14 @@ def run_recognition() -> None:
     cv2.destroyAllWindows()
 
 
-def _predict_sign(
-    sequence: list[np.ndarray],
-    clf: object,
-    le: object,
-) -> tuple[str, float]:
-    """Predict a sign from a landmark sequence."""
-    from src.landmark_extractor import pad_or_truncate_sequence
-
-    padded = pad_or_truncate_sequence(sequence, LANDMARK_SEQUENCE_LENGTH)
-    flat = padded.flatten().reshape(1, -1)
-
-    proba = clf.predict_proba(flat)[0]
-    max_idx = np.argmax(proba)
-    conf = proba[max_idx]
-
-    if conf < 0.3:
-        return "", 0.0
-
-    prediction = le.inverse_transform([max_idx])[0]
-    return prediction, conf
-
-
 def _draw_ui(
     frame: np.ndarray,
     prediction: str,
     confidence: float,
     buffer_size: int,
-    is_recording: bool,
 ) -> None:
-    """Draw the UI overlay on the frame."""
     h, w = frame.shape[:2]
-
     cv2.rectangle(frame, (0, 0), (w, 80), (0, 0, 0), -1)
-
     cv2.putText(
         frame,
         "OeGS Gebärden-Erkennung",
@@ -135,20 +161,17 @@ def _draw_ui(
         (255, 255, 255),
         2,
     )
-
-    status = "Aufnahme..." if is_recording else "Warte auf Gebärde..."
-    color = (0, 0, 255) if is_recording else (0, 255, 0)
     cv2.putText(
         frame,
-        f"Status: {status} ({buffer_size} Frames)",
+        f"Frames: {buffer_size}",
         (10, 60),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
-        color,
+        (0, 255, 0),
         1,
     )
 
-    if prediction:
+    if prediction and confidence >= DISPLAY_CONFIDENCE_THRESHOLD:
         cv2.rectangle(frame, (0, h - 100), (w, h), (0, 0, 0), -1)
         cv2.putText(
             frame,
@@ -159,10 +182,9 @@ def _draw_ui(
             (0, 255, 255),
             3,
         )
-        conf_text = f"Konfidenz: {confidence:.0%}"
         cv2.putText(
             frame,
-            conf_text,
+            f"Konfidenz: {confidence:.0%}",
             (10, h - 15),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
