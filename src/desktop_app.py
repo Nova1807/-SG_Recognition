@@ -134,6 +134,8 @@ class DesktopApp:
 
         self.video_button_rect = (0, 0, 0, 0)
 
+        self.prediction_history: deque[tuple[str, float]] = deque(maxlen=5)
+
     def run(self) -> None:
         """Main entry point."""
         ensure_dirs()
@@ -201,10 +203,11 @@ class DesktopApp:
                 if has_hands:
                     landmarks = extract_landmarks_from_result(self.last_result)
                     self.landmark_buffer.append(landmarks.astype(np.float32))
-                    if self.frame_count % 5 == 0 and len(self.landmark_buffer) >= 10:
+                    if self.frame_count % 3 == 0 and len(self.landmark_buffer) >= 8:
                         self._predict()
                 else:
                     self.landmark_buffer.clear()
+                    self.prediction_history.clear()
                     self.current_prediction = ""
                     self.confidence = 0.0
 
@@ -394,11 +397,33 @@ class DesktopApp:
         pred = self.le.inverse_transform([max_idx])[0]
 
         if pred == "unknown" or conf < DISPLAY_CONFIDENCE_THRESHOLD:
+            self.prediction_history.append(("", 0.0))
+        else:
+            self.prediction_history.append((pred, conf))
+
+        if not self.prediction_history:
             self.current_prediction = ""
             self.confidence = 0.0
+            return
+
+        vote_counts: dict[str, list[float]] = {}
+        for p, c in self.prediction_history:
+            if p:
+                vote_counts.setdefault(p, []).append(c)
+
+        if not vote_counts:
+            self.current_prediction = ""
+            self.confidence = 0.0
+            return
+
+        best_sign = max(vote_counts, key=lambda s: len(vote_counts[s]))
+        best_confs = vote_counts[best_sign]
+        if len(best_confs) >= 2:
+            self.current_prediction = best_sign
+            self.confidence = sum(best_confs) / len(best_confs)
         else:
-            self.current_prediction = pred
-            self.confidence = conf
+            self.current_prediction = ""
+            self.confidence = 0.0
 
     def _predict_from_frames(self, frames: list[np.ndarray]) -> tuple[str, float]:
         """Predict a sign from recorded frames."""

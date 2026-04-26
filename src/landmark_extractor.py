@@ -81,8 +81,9 @@ def pad_or_truncate_sequence(
         return np.array([sequence[idx] for idx in indices], dtype=np.float32)
 
     padded = list(sequence)
+    last = sequence[-1]
     while len(padded) < target_length:
-        padded.append(np.zeros(feature_size, dtype=np.float32))
+        padded.append(last.copy())
     return np.array(padded, dtype=np.float32)
 
 

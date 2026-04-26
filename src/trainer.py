@@ -1,6 +1,7 @@
 import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import LabelEncoder
 
 from src.config import (
@@ -34,18 +35,45 @@ from src.landmark_extractor import load_training_data
 def _augment_sequence(sequence: np.ndarray, n_augments: int = 5) -> list[np.ndarray]:
     augmented = [sequence.astype(np.float32)]
     rng = np.random.default_rng()
+    seq_len = sequence.shape[0]
 
-    for _ in range(n_augments):
-        shift = int(rng.integers(1, 4))
+    for k in range(n_augments):
+        shift = int(rng.integers(2, 7))
         direction = shift if rng.random() > 0.5 else -shift
 
         rolled = np.roll(sequence, direction, axis=0).astype(np.float32)
         aug = rolled.copy()
+
+        noise_std = 0.02 + 0.01 * (k % 3)
         aug[:, PRIMARY_HAND_START:] += rng.normal(
-            0, 0.01, aug[:, PRIMARY_HAND_START:].shape
+            0, noise_std, aug[:, PRIMARY_HAND_START:].shape
         ).astype(np.float32)
         aug[:, :PRIMARY_HAND_START] = rolled[:, :PRIMARY_HAND_START]
         augmented.append(aug)
+
+    speed_factor = rng.uniform(0.7, 0.9)
+    new_len = max(5, int(seq_len * speed_factor))
+    indices = np.linspace(0, seq_len - 1, new_len).astype(int)
+    fast = sequence[indices]
+    last_row = fast[-1:]
+    while len(fast) < seq_len:
+        fast = np.concatenate([fast, last_row], axis=0)
+    augmented.append(fast[:seq_len].astype(np.float32))
+
+    speed_factor = rng.uniform(1.1, 1.4)
+    new_len = int(seq_len * speed_factor)
+    indices = np.linspace(0, seq_len - 1, new_len).astype(int)
+    slow = sequence[indices]
+    step = len(slow) / seq_len
+    pick = [int(i * step) for i in range(seq_len)]
+    augmented.append(slow[pick].astype(np.float32))
+
+    scale = float(rng.uniform(0.8, 1.2))
+    scaled = sequence.copy().astype(np.float32)
+    scaled[:, PRIMARY_HAND_START:PRIMARY_HAND_END] *= scale
+    scaled[:, LEFT_HAND_START:LEFT_HAND_END] *= scale
+    scaled[:, RIGHT_HAND_START:RIGHT_HAND_END] *= scale
+    augmented.append(scaled)
 
     return augmented
 
@@ -220,7 +248,17 @@ def train_model(sign_list: list[str]) -> bool:
         random_state=42,
         n_jobs=-1,
     )
-    clf.fit(_build_features(X_all), y_encoded)
+
+    X_feat = _build_features(X_all)
+
+    n_folds = min(5, min(np.bincount(y_encoded)))
+    if n_folds >= 2:
+        scores = cross_val_score(clf, X_feat, y_encoded, cv=n_folds, scoring="accuracy")
+        print(f"  Cross-Validation Accuracy: {scores.mean():.1%} (+/- {scores.std():.1%})")
+    else:
+        print("  (Zu wenig Daten fuer Cross-Validation)")
+
+    clf.fit(X_feat, y_encoded)
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(clf, MODEL_PATH)
