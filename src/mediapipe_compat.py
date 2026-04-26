@@ -1,0 +1,371 @@
+"""MediaPipe compatibility layer for old (solutions) and new (tasks) API."""
+
+import urllib.request
+
+import mediapipe as mp
+import numpy as np
+
+from src.config import (
+    FEATURES_PER_FRAME,
+    FINGER_CURLS_PER_HAND,
+    HAND_FEATURES_PER_HAND,
+    LEFT_CURL_IDX,
+    LEFT_HAND_END,
+    LEFT_HAND_START,
+    LEFT_PRESENT_IDX,
+    LEFT_WRIST_IDX,
+    MODELS_DIR,
+    PRIMARY_CURL_IDX,
+    PRIMARY_HAND_END,
+    PRIMARY_HAND_START,
+    PRIMARY_PRESENT_IDX,
+    PRIMARY_WRIST_IDX,
+    RIGHT_CURL_IDX,
+    RIGHT_HAND_END,
+    RIGHT_HAND_START,
+    RIGHT_PRESENT_IDX,
+    RIGHT_WRIST_IDX,
+)
+
+_USE_LEGACY = hasattr(mp, "solutions")
+_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "holistic_landmarker/holistic_landmarker/float16/latest/"
+    "holistic_landmarker.task"
+)
+_MODEL_PATH = MODELS_DIR / "holistic_landmarker.task"
+
+
+class HolisticResult:
+    """Unified result from holistic landmark detection."""
+
+    def __init__(
+        self,
+        left_hand_landmarks: list | None,
+        right_hand_landmarks: list | None,
+        pose_landmarks: list | None,
+    ):
+        self.left_hand_landmarks = left_hand_landmarks
+        self.right_hand_landmarks = right_hand_landmarks
+        self.pose_landmarks = pose_landmarks
+
+
+def _download_model() -> None:
+    if _MODEL_PATH.exists():
+        return
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    print("Lade Holistic-Landmarker-Modell herunter...")
+    urllib.request.urlretrieve(_MODEL_URL, str(_MODEL_PATH))
+    print(f"Modell gespeichert: {_MODEL_PATH}")
+
+
+def _flatten_landmarks(lm_data):
+    if not lm_data:
+        return None
+    if isinstance(lm_data, list) and len(lm_data) > 0:
+        first = lm_data[0]
+        if isinstance(first, list):
+            return first
+        if hasattr(first, "x"):
+            return lm_data
+    if hasattr(lm_data, "landmark"):
+        return lm_data.landmark
+    return lm_data
+
+
+class HolisticDetector:
+    """Wrapper providing a unified interface for both mediapipe API versions."""
+
+    def __init__(
+        self,
+        min_detection_confidence: float = 0.5,
+        min_tracking_confidence: float = 0.5,
+    ):
+        self._use_legacy = _USE_LEGACY
+
+        if self._use_legacy:
+            mp_holistic = mp.solutions.holistic
+            self._holistic = mp_holistic.Holistic(
+                min_detection_confidence=min_detection_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+            )
+        else:
+            _download_model()
+            options = mp.tasks.vision.HolisticLandmarkerOptions(
+                base_options=mp.tasks.BaseOptions(
+                    model_asset_path=str(_MODEL_PATH)
+                ),
+                min_hand_landmarks_confidence=min_detection_confidence,
+                min_pose_detection_confidence=min_detection_confidence,
+                min_pose_landmarks_confidence=min_tracking_confidence,
+            )
+            self._landmarker = mp.tasks.vision.HolisticLandmarker.create_from_options(
+                options
+            )
+
+    def process(self, rgb_frame: np.ndarray) -> HolisticResult:
+        if self._use_legacy:
+            rgb_frame.flags.writeable = False
+            results = self._holistic.process(rgb_frame)
+            return HolisticResult(
+                left_hand_landmarks=results.left_hand_landmarks,
+                right_hand_landmarks=results.right_hand_landmarks,
+                pose_landmarks=results.pose_landmarks,
+            )
+
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        results = self._landmarker.detect(mp_image)
+        return HolisticResult(
+            left_hand_landmarks=_flatten_landmarks(results.left_hand_landmarks),
+            right_hand_landmarks=_flatten_landmarks(results.right_hand_landmarks),
+            pose_landmarks=_flatten_landmarks(results.pose_landmarks),
+        )
+
+    def close(self) -> None:
+        if self._use_legacy:
+            self._holistic.close()
+        else:
+            self._landmarker.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def _as_xyz_points(hand_landmarks) -> np.ndarray | None:
+    if not hand_landmarks:
+        return None
+
+    first = hand_landmarks[0]
+    if isinstance(first, tuple) and len(first) == 3:
+        arr = np.array(hand_landmarks, dtype=np.float32)
+    else:
+        arr = np.array(
+            [(float(lm.x), float(lm.y), float(lm.z)) for lm in hand_landmarks],
+            dtype=np.float32,
+        )
+
+    if arr.shape != (21, 3):
+        return None
+    return arr
+
+
+def _normalize_hand_landmarks(
+    hand_landmarks, mirror_x: bool
+) -> np.ndarray | None:
+    pts = _as_xyz_points(hand_landmarks)
+    if pts is None:
+        return None
+
+    pts = pts.copy()
+    if mirror_x:
+        pts[:, 0] = 1.0 - pts[:, 0]
+
+    wrist = pts[0].copy()
+    pts = pts - wrist
+
+    ref = float(np.linalg.norm(pts[9]))
+    if ref < 1e-6:
+        ref = float(np.linalg.norm(pts[5]))
+    if ref < 1e-6:
+        ref = float(np.linalg.norm(pts[17]))
+    if ref < 1e-6:
+        ref = 1.0
+
+    pts = pts / ref
+    return pts.astype(np.float32)
+
+
+def _compute_finger_curls(hand_landmarks) -> np.ndarray:
+    """Curl ratio per finger: 0 = fully extended, ~0.7 = fully curled."""
+    pts = _as_xyz_points(hand_landmarks)
+    if pts is None:
+        return np.zeros(FINGER_CURLS_PER_HAND, dtype=np.float32)
+
+    finger_joints = [
+        [1, 2, 3, 4],     # thumb
+        [5, 6, 7, 8],     # index
+        [9, 10, 11, 12],  # middle
+        [13, 14, 15, 16], # ring
+        [17, 18, 19, 20], # pinky
+    ]
+    curls = np.zeros(FINGER_CURLS_PER_HAND, dtype=np.float32)
+    for i, joints in enumerate(finger_joints):
+        total_len = sum(
+            float(np.linalg.norm(pts[joints[j + 1]] - pts[joints[j]]))
+            for j in range(len(joints) - 1)
+        )
+        if total_len < 1e-6:
+            curls[i] = 0.5
+            continue
+        direct = float(np.linalg.norm(pts[joints[-1]] - pts[joints[0]]))
+        curls[i] = 1.0 - (direct / total_len)
+    return curls
+
+
+def _hand_salience(hand_landmarks) -> float:
+    """Prefer the hand closer to the center of the frame."""
+    pts = _as_xyz_points(hand_landmarks)
+    if pts is None:
+        return 0.0
+
+    cx = float(pts[:, 0].mean())
+    cy = float(pts[:, 1].mean())
+    return 1.0 - (abs(cx - 0.5) + abs(cy - 0.5))
+
+
+def _flatten_or_zero(hand_array: np.ndarray | None) -> np.ndarray:
+    if hand_array is None:
+        return np.zeros(HAND_FEATURES_PER_HAND, dtype=np.float32)
+    return hand_array.reshape(-1).astype(np.float32)
+
+
+def _get_wrist_xy(hand_landmarks) -> tuple[float, float] | None:
+    """Get raw wrist (x, y) position in 0-1 image space."""
+    pts = _as_xyz_points(hand_landmarks)
+    if pts is None:
+        return None
+    return (float(pts[0][0]), float(pts[0][1]))
+
+
+def _select_primary_hand(
+    left_raw,
+    right_raw,
+    left_norm: np.ndarray | None,
+    right_norm: np.ndarray | None,
+) -> tuple[np.ndarray | None, bool]:
+    """Select the dominant hand. Returns (norm, is_left_primary)."""
+    if left_raw and not right_raw:
+        return left_norm, True
+    if right_raw and not left_raw:
+        return right_norm, False
+    if not left_raw and not right_raw:
+        return None, False
+
+    left_score = _hand_salience(left_raw)
+    right_score = _hand_salience(right_raw)
+
+    if left_score > right_score * 1.10:
+        return left_norm, True
+    if right_score > left_score * 1.10:
+        return right_norm, False
+
+    left_extent = 0.0 if left_norm is None else float(np.abs(left_norm).mean())
+    right_extent = 0.0 if right_norm is None else float(np.abs(right_norm).mean())
+
+    if left_extent > right_extent:
+        return left_norm, True
+    return right_norm, False
+
+
+def extract_landmarks_from_result(result: HolisticResult) -> np.ndarray:
+    """Feature layout per frame (213 features):
+    [primary_present, left_present, right_present,
+     primary_hand(63), left_hand(63), right_hand(63),
+     primary_wrist_xy(2), left_wrist_xy(2), right_wrist_xy(2),
+     primary_curls(5), left_curls(5), right_curls(5)]
+
+    - hand(63): wrist-normalized 21 landmark coords (x,y,z)
+    - wrist_xy: raw wrist position in image space for trajectory
+    - curls(5): finger curl ratio per finger (0=extended, ~0.7=curled)
+    """
+    left_wrist_xy = _get_wrist_xy(result.left_hand_landmarks)
+    right_wrist_xy = _get_wrist_xy(result.right_hand_landmarks)
+
+    left_norm = _normalize_hand_landmarks(
+        result.left_hand_landmarks, mirror_x=True
+    )
+    right_norm = _normalize_hand_landmarks(
+        result.right_hand_landmarks, mirror_x=False
+    )
+    primary_norm, is_left_primary = _select_primary_hand(
+        result.left_hand_landmarks,
+        result.right_hand_landmarks,
+        left_norm,
+        right_norm,
+    )
+
+    features = np.zeros(FEATURES_PER_FRAME, dtype=np.float32)
+
+    if primary_norm is not None:
+        features[PRIMARY_PRESENT_IDX] = 1.0
+        features[PRIMARY_HAND_START:PRIMARY_HAND_END] = _flatten_or_zero(
+            primary_norm
+        )
+        pw = left_wrist_xy if is_left_primary else right_wrist_xy
+        if pw is not None:
+            features[PRIMARY_WRIST_IDX] = pw[0]
+            features[PRIMARY_WRIST_IDX + 1] = pw[1]
+        primary_raw = (
+            result.left_hand_landmarks
+            if is_left_primary
+            else result.right_hand_landmarks
+        )
+        features[PRIMARY_CURL_IDX:PRIMARY_CURL_IDX + FINGER_CURLS_PER_HAND] = (
+            _compute_finger_curls(primary_raw)
+        )
+
+    if left_norm is not None:
+        features[LEFT_PRESENT_IDX] = 1.0
+        features[LEFT_HAND_START:LEFT_HAND_END] = _flatten_or_zero(left_norm)
+        if left_wrist_xy is not None:
+            features[LEFT_WRIST_IDX] = left_wrist_xy[0]
+            features[LEFT_WRIST_IDX + 1] = left_wrist_xy[1]
+        features[LEFT_CURL_IDX:LEFT_CURL_IDX + FINGER_CURLS_PER_HAND] = (
+            _compute_finger_curls(result.left_hand_landmarks)
+        )
+
+    if right_norm is not None:
+        features[RIGHT_PRESENT_IDX] = 1.0
+        features[RIGHT_HAND_START:RIGHT_HAND_END] = _flatten_or_zero(right_norm)
+        if right_wrist_xy is not None:
+            features[RIGHT_WRIST_IDX] = right_wrist_xy[0]
+            features[RIGHT_WRIST_IDX + 1] = right_wrist_xy[1]
+        features[RIGHT_CURL_IDX:RIGHT_CURL_IDX + FINGER_CURLS_PER_HAND] = (
+            _compute_finger_curls(result.right_hand_landmarks)
+        )
+
+    return features
+
+
+def draw_landmarks_on_frame(frame: np.ndarray, result: HolisticResult) -> None:
+    if not _USE_LEGACY:
+        return
+
+    mp_drawing = mp.solutions.drawing_utils
+    mp_drawing_styles = mp.solutions.drawing_styles
+    mp_holistic = mp.solutions.holistic
+
+    class _FakeResults:
+        pass
+
+    fake = _FakeResults()
+    fake.left_hand_landmarks = result.left_hand_landmarks
+    fake.right_hand_landmarks = result.right_hand_landmarks
+    fake.pose_landmarks = result.pose_landmarks
+
+    if fake.left_hand_landmarks:
+        mp_drawing.draw_landmarks(
+            frame,
+            fake.left_hand_landmarks,
+            mp_holistic.HAND_CONNECTIONS,
+            mp_drawing_styles.get_default_hand_landmarks_style(),
+            mp_drawing_styles.get_default_hand_connections_style(),
+        )
+    if fake.right_hand_landmarks:
+        mp_drawing.draw_landmarks(
+            frame,
+            fake.right_hand_landmarks,
+            mp_holistic.HAND_CONNECTIONS,
+            mp_drawing_styles.get_default_hand_landmarks_style(),
+            mp_drawing_styles.get_default_hand_connections_style(),
+        )
+    if fake.pose_landmarks:
+        mp_drawing.draw_landmarks(
+            frame,
+            fake.pose_landmarks,
+            mp_holistic.POSE_CONNECTIONS,
+            landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style(),
+        )
