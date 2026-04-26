@@ -8,6 +8,7 @@ from src.config import (
     FEATURE_VERSION_PATH,
     FEATURES_PER_FRAME,
     FINGER_CURLS_PER_HAND,
+    HAND_FEATURES_PER_HAND,
     LABEL_ENCODER_PATH,
     LEFT_CURL_IDX,
     LEFT_HAND_END,
@@ -109,6 +110,26 @@ def _mirror_hands(sequence: np.ndarray) -> np.ndarray:
     return aug
 
 
+_TIP_OFFSETS = [4 * 3, 8 * 3, 12 * 3, 16 * 3, 20 * 3]
+_TIP_PAIRS = [(i, j) for i in range(5) for j in range(i + 1, 5)]
+
+
+def _fingertip_distances(X_all: np.ndarray) -> np.ndarray:
+    """Compute mean inter-fingertip distances per hand slot."""
+    n_samples = X_all.shape[0]
+    hand_starts = [PRIMARY_HAND_START, LEFT_HAND_START, RIGHT_HAND_START]
+    parts = []
+    for hs in hand_starts:
+        hand_data = X_all[:, :, hs:hs + HAND_FEATURES_PER_HAND]
+        for ti, tj in _TIP_PAIRS:
+            tip_i = hand_data[:, :, ti:ti + 3]
+            tip_j = hand_data[:, :, tj:tj + 3]
+            dist = np.linalg.norm(tip_i - tip_j, axis=2)
+            parts.append(np.mean(dist, axis=1, keepdims=True))
+            parts.append(np.std(dist, axis=1, keepdims=True))
+    return np.hstack(parts)
+
+
 def _build_features(X_all: np.ndarray) -> np.ndarray:
     n_samples, seq_len, features = X_all.shape
     X_flat = X_all.reshape(n_samples, seq_len * features)
@@ -135,11 +156,14 @@ def _build_features(X_all: np.ndarray) -> np.ndarray:
     ).astype(np.float32)
     wrist_range = np.ptp(wrist_traj, axis=1)
 
+    tip_dists = _fingertip_distances(X_all)
+
     return np.hstack([
         X_flat, X_mean, X_std, X_max, X_min,
         X_vel_mean, X_vel_max, X_vel_signed_mean,
         X_accel_mean, X_accel_max,
         sign_changes, wrist_range,
+        tip_dists,
     ])
 
 
