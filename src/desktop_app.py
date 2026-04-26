@@ -135,6 +135,7 @@ class DesktopApp:
         self.video_button_rect = (0, 0, 0, 0)
 
         self.prediction_history: deque[tuple[str, float]] = deque(maxlen=5)
+        self.current_tips: list[str] = []
 
     def run(self) -> None:
         """Main entry point."""
@@ -210,6 +211,7 @@ class DesktopApp:
                     self.prediction_history.clear()
                     self.current_prediction = ""
                     self.confidence = 0.0
+                    self.current_tips = []
 
             display = frame.copy()
 
@@ -404,6 +406,7 @@ class DesktopApp:
         if not self.prediction_history:
             self.current_prediction = ""
             self.confidence = 0.0
+            self.current_tips = []
             return
 
         vote_counts: dict[str, list[float]] = {}
@@ -414,6 +417,7 @@ class DesktopApp:
         if not vote_counts:
             self.current_prediction = ""
             self.confidence = 0.0
+            self.current_tips = []
             return
 
         best_sign = max(vote_counts, key=lambda s: len(vote_counts[s]))
@@ -421,9 +425,20 @@ class DesktopApp:
         if len(best_confs) >= 2:
             self.current_prediction = best_sign
             self.confidence = sum(best_confs) / len(best_confs)
+
+            from src.sign_tips import get_tips_for_prediction
+            sorted_indices = np.argsort(proba)[::-1]
+            alternatives = [
+                (str(self.le.inverse_transform([i])[0]), float(proba[i]))
+                for i in sorted_indices[1:6]
+            ]
+            self.current_tips = get_tips_for_prediction(
+                best_sign, alternatives, max_tips=2,
+            )
         else:
             self.current_prediction = ""
             self.confidence = 0.0
+            self.current_tips = []
 
     def _predict_from_frames(self, frames: list[np.ndarray]) -> tuple[str, float]:
         """Predict a sign from recorded frames."""
@@ -512,7 +527,9 @@ class DesktopApp:
             )
 
         if self.current_prediction and self.clf is not None:
-            cv2.rectangle(frame, (0, h - 95), (w, h), (20, 20, 40), -1)
+            n_tips = len(self.current_tips)
+            panel_h = 95 + n_tips * 28
+            cv2.rectangle(frame, (0, h - panel_h), (w, h), (20, 20, 40), -1)
 
             if self.confidence >= 0.6:
                 pred_color = (100, 255, 100)
@@ -524,10 +541,11 @@ class DesktopApp:
                 pred_color = (100, 100, 200)
                 label = f"Unsicher: {self.current_prediction}"
 
+            base_y = h - panel_h + 40
             cv2.putText(
                 frame,
                 label,
-                (15, h - 52),
+                (15, base_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.2,
                 pred_color,
@@ -537,15 +555,28 @@ class DesktopApp:
             cv2.putText(
                 frame,
                 conf_text,
-                (15, h - 18),
+                (15, base_y + 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.6,
                 (200, 200, 200),
                 1,
             )
+            bar_y = h - panel_h + 4
             bar_w = int((w - 30) * self.confidence)
-            cv2.rectangle(frame, (15, h - 100), (w - 15, h - 96), (40, 40, 60), -1)
-            cv2.rectangle(frame, (15, h - 100), (15 + bar_w, h - 96), pred_color, -1)
+            cv2.rectangle(frame, (15, bar_y), (w - 15, bar_y + 4), (40, 40, 60), -1)
+            cv2.rectangle(frame, (15, bar_y), (15 + bar_w, bar_y + 4), pred_color, -1)
+
+            for i, tip in enumerate(self.current_tips):
+                tip_y = base_y + 58 + i * 28
+                cv2.putText(
+                    frame,
+                    tip,
+                    (20, tip_y),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48,
+                    (180, 200, 255),
+                    1,
+                )
 
         if self.pipeline_done and self.clf is not None:
             x1, y1, x2, y2 = w - 245, 18, w - 20, 54
