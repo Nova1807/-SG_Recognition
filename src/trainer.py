@@ -18,6 +18,7 @@ from src.config import (
     PRIMARY_CURL_IDX,
     PRIMARY_HAND_END,
     PRIMARY_HAND_START,
+    PRIMARY_PRESENT_IDX,
     PRIMARY_WRIST_IDX,
     RIGHT_CURL_IDX,
     RIGHT_HAND_END,
@@ -112,8 +113,11 @@ def _inject_other_hand(
     donor_sequence: np.ndarray,
     target: str,
 ) -> np.ndarray:
+    """Inject a donor hand into the empty hand slot (including curls/wrists)."""
     aug = sequence.copy().astype(np.float32)
     donor_primary = donor_sequence[:, PRIMARY_HAND_START:PRIMARY_HAND_END]
+    donor_curls = donor_sequence[:, PRIMARY_CURL_IDX:PRIMARY_CURL_IDX + FINGER_CURLS_PER_HAND]
+    donor_wrist = donor_sequence[:, PRIMARY_WRIST_IDX:PRIMARY_WRIST_IDX + 2]
 
     donor_has_primary = (
         np.linalg.norm(donor_primary, axis=1) > 1e-6
@@ -124,11 +128,15 @@ def _inject_other_hand(
             aug[:, LEFT_PRESENT_IDX], donor_has_primary
         )
         aug[:, LEFT_HAND_START:LEFT_HAND_END] = donor_primary
+        aug[:, LEFT_CURL_IDX:LEFT_CURL_IDX + FINGER_CURLS_PER_HAND] = donor_curls
+        aug[:, LEFT_WRIST_IDX:LEFT_WRIST_IDX + 2] = donor_wrist
     else:
         aug[:, RIGHT_PRESENT_IDX] = np.maximum(
             aug[:, RIGHT_PRESENT_IDX], donor_has_primary
         )
         aug[:, RIGHT_HAND_START:RIGHT_HAND_END] = donor_primary
+        aug[:, RIGHT_CURL_IDX:RIGHT_CURL_IDX + FINGER_CURLS_PER_HAND] = donor_curls
+        aug[:, RIGHT_WRIST_IDX:RIGHT_WRIST_IDX + 2] = donor_wrist
 
     return aug
 
@@ -188,14 +196,12 @@ def train_model(sign_list: list[str]) -> bool:
             if not donor_pool:
                 continue
 
-            donor = donor_pool[int(rng.integers(0, len(donor_pool)))]
-
-            if _is_left_only_sequence(seq):
-                X_aug.append(_inject_other_hand(seq, donor, target="right"))
-                y_aug.append(y[i])
-            elif _is_right_only_sequence(seq):
-                X_aug.append(_inject_other_hand(seq, donor, target="left"))
-                y_aug.append(y[i])
+            if _is_left_only_sequence(seq) or _is_right_only_sequence(seq):
+                target = "right" if _is_left_only_sequence(seq) else "left"
+                for _ in range(3):
+                    donor = donor_pool[int(rng.integers(0, len(donor_pool)))]
+                    X_aug.append(_inject_other_hand(seq, donor, target=target))
+                    y_aug.append(y[i])
 
     X_all = np.array(X_aug, dtype=np.float32)
     y_all = np.array(y_aug, dtype=np.int64)
@@ -230,6 +236,72 @@ def predict_with_features(
     if sequence.ndim == 2:
         sequence = sequence[np.newaxis, :]
     return clf.predict_proba(_build_features(sequence.astype(np.float32)))
+
+
+def _zero_hand_slot(
+    seq: np.ndarray, side: str,
+) -> np.ndarray:
+    """Zero out one hand's features (landmarks, wrist, curls)."""
+    out = seq.copy()
+    if side == "left":
+        out[:, :, LEFT_PRESENT_IDX] = 0
+        out[:, :, LEFT_HAND_START:LEFT_HAND_END] = 0
+        out[:, :, LEFT_WRIST_IDX:LEFT_WRIST_IDX + 2] = 0
+        out[:, :, LEFT_CURL_IDX:LEFT_CURL_IDX + FINGER_CURLS_PER_HAND] = 0
+    else:
+        out[:, :, RIGHT_PRESENT_IDX] = 0
+        out[:, :, RIGHT_HAND_START:RIGHT_HAND_END] = 0
+        out[:, :, RIGHT_WRIST_IDX:RIGHT_WRIST_IDX + 2] = 0
+        out[:, :, RIGHT_CURL_IDX:RIGHT_CURL_IDX + FINGER_CURLS_PER_HAND] = 0
+    return out
+
+
+def predict_best_hand(
+    clf: RandomForestClassifier, sequence: np.ndarray,
+) -> np.ndarray:
+    """When both hands visible, try full / right-only / left-only; return best."""
+    if sequence.ndim == 2:
+        sequence = sequence[np.newaxis, :]
+    seq = sequence.astype(np.float32)
+
+    proba_full = clf.predict_proba(_build_features(seq))[0]
+
+    has_left = bool(np.any(seq[:, :, LEFT_PRESENT_IDX] > 0.5))
+    has_right = bool(np.any(seq[:, :, RIGHT_PRESENT_IDX] > 0.5))
+
+    if not (has_left and has_right):
+        return proba_full[np.newaxis, :]
+
+    candidates = [proba_full]
+
+    right_focus = _zero_hand_slot(seq, "left")
+    right_focus[:, :, PRIMARY_PRESENT_IDX] = right_focus[:, :, RIGHT_PRESENT_IDX]
+    right_focus[:, :, PRIMARY_HAND_START:PRIMARY_HAND_END] = (
+        right_focus[:, :, RIGHT_HAND_START:RIGHT_HAND_END]
+    )
+    right_focus[:, :, PRIMARY_WRIST_IDX:PRIMARY_WRIST_IDX + 2] = (
+        right_focus[:, :, RIGHT_WRIST_IDX:RIGHT_WRIST_IDX + 2]
+    )
+    right_focus[:, :, PRIMARY_CURL_IDX:PRIMARY_CURL_IDX + FINGER_CURLS_PER_HAND] = (
+        right_focus[:, :, RIGHT_CURL_IDX:RIGHT_CURL_IDX + FINGER_CURLS_PER_HAND]
+    )
+    candidates.append(clf.predict_proba(_build_features(right_focus))[0])
+
+    left_focus = _zero_hand_slot(seq, "right")
+    left_focus[:, :, PRIMARY_PRESENT_IDX] = left_focus[:, :, LEFT_PRESENT_IDX]
+    left_focus[:, :, PRIMARY_HAND_START:PRIMARY_HAND_END] = (
+        left_focus[:, :, LEFT_HAND_START:LEFT_HAND_END]
+    )
+    left_focus[:, :, PRIMARY_WRIST_IDX:PRIMARY_WRIST_IDX + 2] = (
+        left_focus[:, :, LEFT_WRIST_IDX:LEFT_WRIST_IDX + 2]
+    )
+    left_focus[:, :, PRIMARY_CURL_IDX:PRIMARY_CURL_IDX + FINGER_CURLS_PER_HAND] = (
+        left_focus[:, :, LEFT_CURL_IDX:LEFT_CURL_IDX + FINGER_CURLS_PER_HAND]
+    )
+    candidates.append(clf.predict_proba(_build_features(left_focus))[0])
+
+    best = max(candidates, key=lambda p: float(p.max()))
+    return best[np.newaxis, :]
 
 
 def load_model() -> tuple[RandomForestClassifier, LabelEncoder] | None:

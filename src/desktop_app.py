@@ -382,13 +382,13 @@ class DesktopApp:
 
         from src.config import DISPLAY_CONFIDENCE_THRESHOLD
         from src.landmark_extractor import pad_or_truncate_sequence
-        from src.trainer import predict_with_features
+        from src.trainer import predict_best_hand
 
         padded = pad_or_truncate_sequence(
             list(self.landmark_buffer),
             LANDMARK_SEQUENCE_LENGTH,
         )
-        proba = predict_with_features(self.clf, padded)[0]
+        proba = predict_best_hand(self.clf, padded)[0]
         max_idx = int(np.argmax(proba))
         conf = float(proba[max_idx])
         pred = self.le.inverse_transform([max_idx])[0]
@@ -406,7 +406,7 @@ class DesktopApp:
             return "", 0.0
 
         from src.landmark_extractor import pad_or_truncate_sequence
-        from src.trainer import predict_with_features
+        from src.trainer import predict_best_hand
 
         sequence: list[np.ndarray] = []
 
@@ -431,7 +431,7 @@ class DesktopApp:
             return "", 0.0
 
         padded = pad_or_truncate_sequence(sequence, LANDMARK_SEQUENCE_LENGTH)
-        proba = predict_with_features(self.clf, padded)[0]
+        proba = predict_best_hand(self.clf, padded)[0]
         max_idx = int(np.argmax(proba))
         conf = float(proba[max_idx])
         pred = self.le.inverse_transform([max_idx])[0]

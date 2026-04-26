@@ -22,7 +22,7 @@ from src.mediapipe_compat import (
     draw_landmarks_on_frame,
     extract_landmarks_from_result,
 )
-from src.trainer import load_model, predict_with_features
+from src.trainer import load_model, predict_best_hand, predict_with_features
 
 
 def predict_sequence(sequence: list[np.ndarray] | np.ndarray) -> dict[str, object]:
@@ -37,7 +37,7 @@ def predict_sequence(sequence: list[np.ndarray] | np.ndarray) -> dict[str, objec
             return {"prediction": None, "confidence": 0.0}
         sequence = pad_or_truncate_sequence(sequence, LANDMARK_SEQUENCE_LENGTH)
 
-    proba = predict_with_features(clf, sequence)[0]
+    proba = predict_best_hand(clf, sequence)[0]
     max_idx = int(np.argmax(proba))
     conf = float(proba[max_idx])
     pred = le.inverse_transform([max_idx])[0]
@@ -107,7 +107,7 @@ def run_recognition() -> None:
                         list(landmark_buffer),
                         LANDMARK_SEQUENCE_LENGTH,
                     )
-                    proba = predict_with_features(clf, padded)[0]
+                    proba = predict_best_hand(clf, padded)[0]
                     max_idx = int(np.argmax(proba))
                     conf = float(proba[max_idx])
                     pred = le.inverse_transform([max_idx])[0]
