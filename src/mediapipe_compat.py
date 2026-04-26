@@ -7,16 +7,20 @@ import numpy as np
 
 from src.config import (
     FEATURES_PER_FRAME,
+    FINGER_CURLS_PER_HAND,
     HAND_FEATURES_PER_HAND,
+    LEFT_CURL_IDX,
     LEFT_HAND_END,
     LEFT_HAND_START,
     LEFT_PRESENT_IDX,
     LEFT_WRIST_IDX,
     MODELS_DIR,
+    PRIMARY_CURL_IDX,
     PRIMARY_HAND_END,
     PRIMARY_HAND_START,
     PRIMARY_PRESENT_IDX,
     PRIMARY_WRIST_IDX,
+    RIGHT_CURL_IDX,
     RIGHT_HAND_END,
     RIGHT_HAND_START,
     RIGHT_PRESENT_IDX,
@@ -174,14 +178,42 @@ def _normalize_hand_landmarks(
     return pts.astype(np.float32)
 
 
+def _compute_finger_curls(hand_landmarks) -> np.ndarray:
+    """Curl ratio per finger: 0 = fully extended, ~0.7 = fully curled."""
+    pts = _as_xyz_points(hand_landmarks)
+    if pts is None:
+        return np.zeros(FINGER_CURLS_PER_HAND, dtype=np.float32)
+
+    finger_joints = [
+        [1, 2, 3, 4],     # thumb
+        [5, 6, 7, 8],     # index
+        [9, 10, 11, 12],  # middle
+        [13, 14, 15, 16], # ring
+        [17, 18, 19, 20], # pinky
+    ]
+    curls = np.zeros(FINGER_CURLS_PER_HAND, dtype=np.float32)
+    for i, joints in enumerate(finger_joints):
+        total_len = sum(
+            float(np.linalg.norm(pts[joints[j + 1]] - pts[joints[j]]))
+            for j in range(len(joints) - 1)
+        )
+        if total_len < 1e-6:
+            curls[i] = 0.5
+            continue
+        direct = float(np.linalg.norm(pts[joints[-1]] - pts[joints[0]]))
+        curls[i] = 1.0 - (direct / total_len)
+    return curls
+
+
 def _hand_salience(hand_landmarks) -> float:
+    """Prefer the hand closer to the center of the frame."""
     pts = _as_xyz_points(hand_landmarks)
     if pts is None:
         return 0.0
 
-    span = pts.max(axis=0) - pts.min(axis=0)
-    tip_reach = np.linalg.norm(pts[[4, 8, 12, 16, 20]] - pts[0], axis=1).mean()
-    return float((span[0] * span[1]) + 0.35 * tip_reach)
+    cx = float(pts[:, 0].mean())
+    cy = float(pts[:, 1].mean())
+    return 1.0 - (abs(cx - 0.5) + abs(cy - 0.5))
 
 
 def _flatten_or_zero(hand_array: np.ndarray | None) -> np.ndarray:
@@ -229,15 +261,15 @@ def _select_primary_hand(
 
 
 def extract_landmarks_from_result(result: HolisticResult) -> np.ndarray:
-    """Feature layout per frame:
+    """Feature layout per frame (213 features):
     [primary_present, left_present, right_present,
      primary_hand(63), left_hand(63), right_hand(63),
-     primary_wrist_xy(2), left_wrist_xy(2), right_wrist_xy(2)]
+     primary_wrist_xy(2), left_wrist_xy(2), right_wrist_xy(2),
+     primary_curls(5), left_curls(5), right_curls(5)]
 
-    - primary_hand: canonical active/dominant hand, left mirrored to right-like form
-    - left_hand: physical left hand, mirrored to right-like canonical form
-    - right_hand: physical right hand, kept as right-like canonical form
-    - wrist_xy: raw wrist position in image space for trajectory tracking
+    - hand(63): wrist-normalized 21 landmark coords (x,y,z)
+    - wrist_xy: raw wrist position in image space for trajectory
+    - curls(5): finger curl ratio per finger (0=extended, ~0.7=curled)
     """
     left_wrist_xy = _get_wrist_xy(result.left_hand_landmarks)
     right_wrist_xy = _get_wrist_xy(result.right_hand_landmarks)
@@ -266,6 +298,14 @@ def extract_landmarks_from_result(result: HolisticResult) -> np.ndarray:
         if pw is not None:
             features[PRIMARY_WRIST_IDX] = pw[0]
             features[PRIMARY_WRIST_IDX + 1] = pw[1]
+        primary_raw = (
+            result.left_hand_landmarks
+            if is_left_primary
+            else result.right_hand_landmarks
+        )
+        features[PRIMARY_CURL_IDX:PRIMARY_CURL_IDX + FINGER_CURLS_PER_HAND] = (
+            _compute_finger_curls(primary_raw)
+        )
 
     if left_norm is not None:
         features[LEFT_PRESENT_IDX] = 1.0
@@ -273,6 +313,9 @@ def extract_landmarks_from_result(result: HolisticResult) -> np.ndarray:
         if left_wrist_xy is not None:
             features[LEFT_WRIST_IDX] = left_wrist_xy[0]
             features[LEFT_WRIST_IDX + 1] = left_wrist_xy[1]
+        features[LEFT_CURL_IDX:LEFT_CURL_IDX + FINGER_CURLS_PER_HAND] = (
+            _compute_finger_curls(result.left_hand_landmarks)
+        )
 
     if right_norm is not None:
         features[RIGHT_PRESENT_IDX] = 1.0
@@ -280,6 +323,9 @@ def extract_landmarks_from_result(result: HolisticResult) -> np.ndarray:
         if right_wrist_xy is not None:
             features[RIGHT_WRIST_IDX] = right_wrist_xy[0]
             features[RIGHT_WRIST_IDX + 1] = right_wrist_xy[1]
+        features[RIGHT_CURL_IDX:RIGHT_CURL_IDX + FINGER_CURLS_PER_HAND] = (
+            _compute_finger_curls(result.right_hand_landmarks)
+        )
 
     return features
 

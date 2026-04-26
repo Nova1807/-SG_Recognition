@@ -6,16 +6,20 @@ from sklearn.preprocessing import LabelEncoder
 from src.config import (
     FEATURE_VERSION_PATH,
     FEATURES_PER_FRAME,
+    FINGER_CURLS_PER_HAND,
     LABEL_ENCODER_PATH,
+    LEFT_CURL_IDX,
     LEFT_HAND_END,
     LEFT_HAND_START,
     LEFT_PRESENT_IDX,
     LEFT_WRIST_IDX,
     MODEL_PATH,
     MODELS_DIR,
+    PRIMARY_CURL_IDX,
     PRIMARY_HAND_END,
     PRIMARY_HAND_START,
     PRIMARY_WRIST_IDX,
+    RIGHT_CURL_IDX,
     RIGHT_HAND_END,
     RIGHT_HAND_START,
     RIGHT_PRESENT_IDX,
@@ -67,6 +71,11 @@ def _mirror_hands(sequence: np.ndarray) -> np.ndarray:
     aug[:, RIGHT_WRIST_IDX + 1] = left_wrist[:, 1]
 
     aug[:, PRIMARY_WRIST_IDX] = 1.0 - sequence[:, PRIMARY_WRIST_IDX]
+
+    left_curls = sequence[:, LEFT_CURL_IDX:LEFT_CURL_IDX + FINGER_CURLS_PER_HAND].copy()
+    right_curls = sequence[:, RIGHT_CURL_IDX:RIGHT_CURL_IDX + FINGER_CURLS_PER_HAND].copy()
+    aug[:, LEFT_CURL_IDX:LEFT_CURL_IDX + FINGER_CURLS_PER_HAND] = right_curls
+    aug[:, RIGHT_CURL_IDX:RIGHT_CURL_IDX + FINGER_CURLS_PER_HAND] = left_curls
 
     return aug
 
