@@ -11,13 +11,16 @@ from src.config import (
     LEFT_HAND_END,
     LEFT_HAND_START,
     LEFT_PRESENT_IDX,
+    LEFT_WRIST_IDX,
     MODELS_DIR,
     PRIMARY_HAND_END,
     PRIMARY_HAND_START,
     PRIMARY_PRESENT_IDX,
+    PRIMARY_WRIST_IDX,
     RIGHT_HAND_END,
     RIGHT_HAND_START,
     RIGHT_PRESENT_IDX,
+    RIGHT_WRIST_IDX,
 )
 
 _USE_LEGACY = hasattr(mp, "solutions")
@@ -187,51 +190,65 @@ def _flatten_or_zero(hand_array: np.ndarray | None) -> np.ndarray:
     return hand_array.reshape(-1).astype(np.float32)
 
 
+def _get_wrist_xy(hand_landmarks) -> tuple[float, float] | None:
+    """Get raw wrist (x, y) position in 0-1 image space."""
+    pts = _as_xyz_points(hand_landmarks)
+    if pts is None:
+        return None
+    return (float(pts[0][0]), float(pts[0][1]))
+
+
 def _select_primary_hand(
     left_raw,
     right_raw,
     left_norm: np.ndarray | None,
     right_norm: np.ndarray | None,
-) -> np.ndarray | None:
+) -> tuple[np.ndarray | None, bool]:
+    """Select the dominant hand. Returns (norm, is_left_primary)."""
     if left_raw and not right_raw:
-        return left_norm
+        return left_norm, True
     if right_raw and not left_raw:
-        return right_norm
+        return right_norm, False
     if not left_raw and not right_raw:
-        return None
+        return None, False
 
     left_score = _hand_salience(left_raw)
     right_score = _hand_salience(right_raw)
 
     if left_score > right_score * 1.10:
-        return left_norm
+        return left_norm, True
     if right_score > left_score * 1.10:
-        return right_norm
+        return right_norm, False
 
     left_extent = 0.0 if left_norm is None else float(np.abs(left_norm).mean())
     right_extent = 0.0 if right_norm is None else float(np.abs(right_norm).mean())
 
     if left_extent > right_extent:
-        return left_norm
-    return right_norm
+        return left_norm, True
+    return right_norm, False
 
 
 def extract_landmarks_from_result(result: HolisticResult) -> np.ndarray:
     """Feature layout per frame:
     [primary_present, left_present, right_present,
-     primary_hand(63), left_hand(63), right_hand(63)]
+     primary_hand(63), left_hand(63), right_hand(63),
+     primary_wrist_xy(2), left_wrist_xy(2), right_wrist_xy(2)]
 
     - primary_hand: canonical active/dominant hand, left mirrored to right-like form
     - left_hand: physical left hand, mirrored to right-like canonical form
     - right_hand: physical right hand, kept as right-like canonical form
+    - wrist_xy: raw wrist position in image space for trajectory tracking
     """
+    left_wrist_xy = _get_wrist_xy(result.left_hand_landmarks)
+    right_wrist_xy = _get_wrist_xy(result.right_hand_landmarks)
+
     left_norm = _normalize_hand_landmarks(
         result.left_hand_landmarks, mirror_x=True
     )
     right_norm = _normalize_hand_landmarks(
         result.right_hand_landmarks, mirror_x=False
     )
-    primary_norm = _select_primary_hand(
+    primary_norm, is_left_primary = _select_primary_hand(
         result.left_hand_landmarks,
         result.right_hand_landmarks,
         left_norm,
@@ -245,14 +262,24 @@ def extract_landmarks_from_result(result: HolisticResult) -> np.ndarray:
         features[PRIMARY_HAND_START:PRIMARY_HAND_END] = _flatten_or_zero(
             primary_norm
         )
+        pw = left_wrist_xy if is_left_primary else right_wrist_xy
+        if pw is not None:
+            features[PRIMARY_WRIST_IDX] = pw[0]
+            features[PRIMARY_WRIST_IDX + 1] = pw[1]
 
     if left_norm is not None:
         features[LEFT_PRESENT_IDX] = 1.0
         features[LEFT_HAND_START:LEFT_HAND_END] = _flatten_or_zero(left_norm)
+        if left_wrist_xy is not None:
+            features[LEFT_WRIST_IDX] = left_wrist_xy[0]
+            features[LEFT_WRIST_IDX + 1] = left_wrist_xy[1]
 
     if right_norm is not None:
         features[RIGHT_PRESENT_IDX] = 1.0
         features[RIGHT_HAND_START:RIGHT_HAND_END] = _flatten_or_zero(right_norm)
+        if right_wrist_xy is not None:
+            features[RIGHT_WRIST_IDX] = right_wrist_xy[0]
+            features[RIGHT_WRIST_IDX + 1] = right_wrist_xy[1]
 
     return features
 

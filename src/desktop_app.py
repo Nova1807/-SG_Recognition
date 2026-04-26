@@ -9,6 +9,8 @@ import cv2
 import numpy as np
 
 from src.config import (
+    FEATURES_PER_FRAME,
+    FEATURE_VERSION_PATH,
     LABEL_ENCODER_PATH,
     LANDMARK_SEQUENCE_LENGTH,
     MIN_VIDEOS_PER_SIGN,
@@ -144,12 +146,16 @@ class DesktopApp:
         for s in self.sign_list:
             print(f"  - {s}")
 
-        if MODEL_PATH.exists() and LABEL_ENCODER_PATH.exists():
+        model_version_ok = self._check_feature_version()
+        if MODEL_PATH.exists() and LABEL_ENCODER_PATH.exists() and model_version_ok:
             print("\nTrainiertes Modell gefunden. Lade Modell...")
             self._load_model()
             self.pipeline_done = True
         else:
-            print("\nKein Modell gefunden. Starte Trainingspipeline...")
+            if not model_version_ok and MODEL_PATH.exists():
+                print("\nFeature-Format geaendert. Modell wird neu trainiert...")
+            else:
+                print("\nKein Modell gefunden. Starte Trainingspipeline...")
             pipeline_thread = threading.Thread(target=self._run_pipeline, daemon=True)
             pipeline_thread.start()
 
@@ -240,6 +246,16 @@ class DesktopApp:
         if self.detector:
             self.detector.close()
 
+    def _check_feature_version(self) -> bool:
+        """Check if the saved model matches the current feature format."""
+        if not FEATURE_VERSION_PATH.exists():
+            return False
+        try:
+            stored = int(FEATURE_VERSION_PATH.read_text().strip())
+            return stored == FEATURES_PER_FRAME
+        except (ValueError, IOError):
+            return False
+
     def _run_pipeline(self) -> None:
         """Run download -> extract -> train pipeline automatically."""
         import shutil
@@ -250,6 +266,10 @@ class DesktopApp:
             shutil.rmtree(LANDMARKS_DIR)
             LANDMARKS_DIR.mkdir(parents=True, exist_ok=True)
             print("Alte Landmarks geloescht (Feature-Format aktualisiert)")
+
+        for old_file in [MODEL_PATH, LABEL_ENCODER_PATH, FEATURE_VERSION_PATH]:
+            if old_file.exists():
+                old_file.unlink()
 
         self.pipeline_status = "Videos herunterladen..."
         print("\n=== Videos herunterladen ===")
@@ -360,6 +380,7 @@ class DesktopApp:
         if self.clf is None or self.le is None:
             return
 
+        from src.config import DISPLAY_CONFIDENCE_THRESHOLD
         from src.landmark_extractor import pad_or_truncate_sequence
         from src.trainer import predict_with_features
 
@@ -370,14 +391,14 @@ class DesktopApp:
         proba = predict_with_features(self.clf, padded)[0]
         max_idx = int(np.argmax(proba))
         conf = float(proba[max_idx])
+        pred = self.le.inverse_transform([max_idx])[0]
 
-        threshold = 0.5
-        if conf >= threshold:
-            pred = self.le.inverse_transform([max_idx])[0]
-            self.current_prediction = pred
-        else:
+        if pred == "unknown" or conf < DISPLAY_CONFIDENCE_THRESHOLD:
             self.current_prediction = ""
-        self.confidence = conf
+            self.confidence = 0.0
+        else:
+            self.current_prediction = pred
+            self.confidence = conf
 
     def _predict_from_frames(self, frames: list[np.ndarray]) -> tuple[str, float]:
         """Predict a sign from recorded frames."""
@@ -415,7 +436,7 @@ class DesktopApp:
         conf = float(proba[max_idx])
         pred = self.le.inverse_transform([max_idx])[0]
 
-        if conf < 0.4:
+        if pred == "unknown" or conf < 0.4:
             return "", conf
         return pred, conf
 

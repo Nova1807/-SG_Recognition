@@ -1,4 +1,5 @@
 from collections import deque
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -16,6 +17,14 @@ from src.landmark_extractor import (
     extract_landmarks_from_video,
     pad_or_truncate_sequence,
 )
+from src.mediapipe_compat import (
+    HolisticDetector,
+    draw_landmarks_on_frame,
+    extract_landmarks_from_result,
+)
+from src.trainer import load_model, predict_with_features
+
+
 def predict_sequence(sequence: list[np.ndarray] | np.ndarray) -> dict[str, object]:
     result = load_model()
     if result is None:
@@ -54,12 +63,6 @@ def predict_video_file(video_path: str | Path) -> dict[str, object]:
     result = predict_sequence(landmarks)
     result["frames_used"] = len(landmarks)
     return result
-from src.mediapipe_compat import (
-    HolisticDetector,
-    draw_landmarks_on_frame,
-    extract_landmarks_from_result,
-)
-from src.trainer import load_model, predict_with_features
 
 
 def run_recognition() -> None:
@@ -154,7 +157,7 @@ def _draw_ui(
     cv2.rectangle(frame, (0, 0), (w, 80), (0, 0, 0), -1)
     cv2.putText(
         frame,
-        "OeGS Gebärden-Erkennung",
+        "OeGS Gebaerden-Erkennung",
         (10, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,

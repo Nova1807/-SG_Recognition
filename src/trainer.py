@@ -4,17 +4,22 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
 
 from src.config import (
+    FEATURE_VERSION_PATH,
+    FEATURES_PER_FRAME,
     LABEL_ENCODER_PATH,
     LEFT_HAND_END,
     LEFT_HAND_START,
     LEFT_PRESENT_IDX,
+    LEFT_WRIST_IDX,
     MODEL_PATH,
     MODELS_DIR,
     PRIMARY_HAND_END,
     PRIMARY_HAND_START,
+    PRIMARY_WRIST_IDX,
     RIGHT_HAND_END,
     RIGHT_HAND_START,
     RIGHT_PRESENT_IDX,
+    RIGHT_WRIST_IDX,
     UNKNOWN_SIGN_LABEL,
     ensure_dirs,
 )
@@ -40,6 +45,32 @@ def _augment_sequence(sequence: np.ndarray, n_augments: int = 5) -> list[np.ndar
     return augmented
 
 
+def _mirror_hands(sequence: np.ndarray) -> np.ndarray:
+    """Swap left and right hand features so the model treats both hands equally."""
+    aug = sequence.copy().astype(np.float32)
+
+    left_present = sequence[:, LEFT_PRESENT_IDX].copy()
+    right_present = sequence[:, RIGHT_PRESENT_IDX].copy()
+    aug[:, LEFT_PRESENT_IDX] = right_present
+    aug[:, RIGHT_PRESENT_IDX] = left_present
+
+    left_hand = sequence[:, LEFT_HAND_START:LEFT_HAND_END].copy()
+    right_hand = sequence[:, RIGHT_HAND_START:RIGHT_HAND_END].copy()
+    aug[:, LEFT_HAND_START:LEFT_HAND_END] = right_hand
+    aug[:, RIGHT_HAND_START:RIGHT_HAND_END] = left_hand
+
+    left_wrist = sequence[:, LEFT_WRIST_IDX:LEFT_WRIST_IDX + 2].copy()
+    right_wrist = sequence[:, RIGHT_WRIST_IDX:RIGHT_WRIST_IDX + 2].copy()
+    aug[:, LEFT_WRIST_IDX] = 1.0 - right_wrist[:, 0]
+    aug[:, LEFT_WRIST_IDX + 1] = right_wrist[:, 1]
+    aug[:, RIGHT_WRIST_IDX] = 1.0 - left_wrist[:, 0]
+    aug[:, RIGHT_WRIST_IDX + 1] = left_wrist[:, 1]
+
+    aug[:, PRIMARY_WRIST_IDX] = 1.0 - sequence[:, PRIMARY_WRIST_IDX]
+
+    return aug
+
+
 def _build_features(X_all: np.ndarray) -> np.ndarray:
     n_samples, seq_len, features = X_all.shape
     X_flat = X_all.reshape(n_samples, seq_len * features)
@@ -47,7 +78,12 @@ def _build_features(X_all: np.ndarray) -> np.ndarray:
     X_std = np.std(X_all, axis=1)
     X_max = np.max(X_all, axis=1)
     X_min = np.min(X_all, axis=1)
-    return np.hstack([X_flat, X_mean, X_std, X_max, X_min])
+
+    X_diff = np.diff(X_all, axis=1, prepend=X_all[:, :1, :])
+    X_vel_mean = np.mean(np.abs(X_diff), axis=1)
+    X_vel_max = np.max(np.abs(X_diff), axis=1)
+
+    return np.hstack([X_flat, X_mean, X_std, X_max, X_min, X_vel_mean, X_vel_max])
 
 
 def _is_left_only_sequence(sequence: np.ndarray) -> bool:
@@ -97,10 +133,21 @@ def train_model(sign_list: list[str]) -> bool:
         print("[FEHLER] Zu wenig Trainingsdaten!")
         return False
 
+    print(f"  {len(X)} Sequenzen, {len(label_names)} Gebaerden")
+
     real_hand_sequences = X.copy().astype(np.float32)
     unknown_label_idx = len(label_names)
 
-    unknown = np.zeros_like(X[: max(1, len(X) // 3)], dtype=np.float32)
+    rng_noise = np.random.default_rng(123)
+    n_noise = max(1, len(X) // 3)
+    noise_unknown = rng_noise.normal(0, 0.05, (n_noise,) + X.shape[1:]).astype(
+        np.float32
+    )
+    noise_unknown[:, :, :PRIMARY_HAND_START] = 0.0
+
+    unknown_zero = np.zeros_like(X[: max(1, len(X) // 4)], dtype=np.float32)
+    unknown = np.concatenate([unknown_zero, noise_unknown], axis=0)
+
     X = np.concatenate([X, unknown], axis=0).astype(np.float32)
     y = np.concatenate(
         [y, np.full(len(unknown), unknown_label_idx, dtype=np.int64)],
@@ -123,7 +170,13 @@ def train_model(sign_list: list[str]) -> bool:
             X_aug.append(seq)
             y_aug.append(y[i])
 
-            if y[i] == unknown_label_idx or not donor_pool:
+            if y[i] == unknown_label_idx:
+                continue
+
+            X_aug.append(_mirror_hands(seq))
+            y_aug.append(y[i])
+
+            if not donor_pool:
                 continue
 
             donor = donor_pool[int(rng.integers(0, len(donor_pool)))]
@@ -137,6 +190,8 @@ def train_model(sign_list: list[str]) -> bool:
 
     X_all = np.array(X_aug, dtype=np.float32)
     y_all = np.array(y_aug, dtype=np.int64)
+
+    print(f"  Augmentiert: {len(X_all)} Samples")
 
     le = LabelEncoder()
     le.fit(label_names)
@@ -155,6 +210,8 @@ def train_model(sign_list: list[str]) -> bool:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(clf, MODEL_PATH)
     joblib.dump(le, LABEL_ENCODER_PATH)
+    FEATURE_VERSION_PATH.write_text(str(FEATURES_PER_FRAME))
+    print(f"  Modell gespeichert (Feature-Version: {FEATURES_PER_FRAME})")
     return True
 
 
