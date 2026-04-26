@@ -121,7 +121,26 @@ def _build_features(X_all: np.ndarray) -> np.ndarray:
     X_vel_mean = np.mean(np.abs(X_diff), axis=1)
     X_vel_max = np.max(np.abs(X_diff), axis=1)
 
-    return np.hstack([X_flat, X_mean, X_std, X_max, X_min, X_vel_mean, X_vel_max])
+    X_vel_signed_mean = np.mean(X_diff, axis=1)
+
+    X_accel = np.diff(X_diff, axis=1, prepend=X_diff[:, :1, :])
+    X_accel_mean = np.mean(np.abs(X_accel), axis=1)
+    X_accel_max = np.max(np.abs(X_accel), axis=1)
+
+    wrist_cols = [PRIMARY_WRIST_IDX, PRIMARY_WRIST_IDX + 1]
+    wrist_traj = X_all[:, :, wrist_cols]
+    wrist_diff = np.diff(wrist_traj, axis=1, prepend=wrist_traj[:, :1, :])
+    sign_changes = np.sum(
+        np.abs(np.diff(np.sign(wrist_diff), axis=1)) > 0.5, axis=1
+    ).astype(np.float32)
+    wrist_range = np.ptp(wrist_traj, axis=1)
+
+    return np.hstack([
+        X_flat, X_mean, X_std, X_max, X_min,
+        X_vel_mean, X_vel_max, X_vel_signed_mean,
+        X_accel_mean, X_accel_max,
+        sign_changes, wrist_range,
+    ])
 
 
 def _is_left_only_sequence(sequence: np.ndarray) -> bool:
